@@ -10,19 +10,10 @@ __pycache__/
 venv/
 
 # Generated report outputs
-figure0_intro_typical_day_all_centres.png
-figure1_flex_intermediate.png
-figure2_flex_bess_10_intermediate.png
-figure2_flex_bess_25_intermediate.png
-flexibility_summary_intermediate.csv
-bess_summary_intermediate.csv
-ai_dc_flexibility_impact.png
-ai_dc_flexibility_timeseries.csv
-ai_dc_flexibility_metrics.csv
+outputs/
 
 # Large/raw local data (not for GitHub)
-ukpn-data-centre-demand-profiles.csv
+data/raw/
 
 # Archive / legacy scratch
-old/__pycache__/
-old/
+archive/

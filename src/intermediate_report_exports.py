@@ -35,12 +35,12 @@ class ReportContext:
     output_dir: Path
     characteristic_day: pd.Timestamp
     day_df: pd.DataFrame
-    centres_day_df: pd.DataFrame
+    centres_year_df: pd.DataFrame | None
     battery_daily_stats: pd.DataFrame
 
 
 def add_common_report_args(parser: argparse.ArgumentParser) -> argparse.ArgumentParser:
-    parser.add_argument("--input", type=str, default="ukpn-data-centre-demand-profiles.csv")
+    parser.add_argument("--input", type=str, default="data/raw/ukpn-data-centre-demand-profiles.csv")
     parser.add_argument("--output-dir", type=str, default=".")
     parser.add_argument("--year", type=int, default=2025)
     parser.add_argument("--dc-type", type=str, default="")
@@ -596,7 +596,7 @@ def load_centre_year_timeseries(
     return pd.concat(parts, ignore_index=True)
 
 
-def build_context(args: argparse.Namespace) -> ReportContext:
+def build_context(args: argparse.Namespace, include_rq1_data: bool) -> ReportContext:
     output_dir = Path(args.output_dir)
     output_dir.mkdir(parents=True, exist_ok=True)
 
@@ -628,15 +628,17 @@ def build_context(args: argparse.Namespace) -> ReportContext:
     if day_df.empty:
         raise ValueError(f"No characteristic-day data found for year {args.year}.")
 
-    centres_day_df = load_centre_year_timeseries(
-        csv_path=input_csv,
-        year=args.year,
-        target_date=characteristic_day,
-        dc_type=args.dc_type.strip() if args.dc_type else None,
-        voltage_level=args.voltage_level.strip() if args.voltage_level else None,
-        min_utilisation=args.min_utilisation,
-        chunksize=args.chunksize,
-    )
+    centres_year_df: pd.DataFrame | None = None
+    if include_rq1_data:
+        centres_year_df = load_centre_year_timeseries(
+            csv_path=input_csv,
+            year=args.year,
+            target_date=None,
+            dc_type=args.dc_type.strip() if args.dc_type else None,
+            voltage_level=args.voltage_level.strip() if args.voltage_level else None,
+            min_utilisation=args.min_utilisation,
+            chunksize=args.chunksize,
+        )
 
     return ReportContext(
         year=args.year,
@@ -644,7 +646,7 @@ def build_context(args: argparse.Namespace) -> ReportContext:
         output_dir=output_dir,
         characteristic_day=characteristic_day,
         day_df=day_df,
-        centres_day_df=centres_day_df,
+        centres_year_df=centres_year_df,
         battery_daily_stats=results.battery_daily_stats,
     )
 
@@ -663,22 +665,21 @@ def parse_args() -> argparse.Namespace:
 
 def main() -> None:
     args = parse_args()
-    context = build_context(args)
+    include_rq1_data = args.rq in {"all", "rq1"}
+    context = build_context(args, include_rq1_data=include_rq1_data)
 
     saved_files: list[str] = []
 
     if args.rq in {"all", "rq1"}:
-        saved_files.append(
-            str(
-                run_rq1(
-                    day_df=context.day_df,
-                    centres_day_df=context.centres_day_df,
-                    year=context.year,
-                    characteristic_day=context.characteristic_day,
-                    output_dir=context.output_dir,
-                ).resolve()
-            )
+        if context.centres_year_df is None:
+            raise ValueError("RQ1 selected but centre-level year data is unavailable.")
+        rq1_files = run_rq1(
+            centres_year_df=context.centres_year_df,
+            year=context.year,
+            characteristic_day=context.characteristic_day,
+            output_dir=context.output_dir,
         )
+        saved_files.extend([str(p.resolve()) for p in rq1_files])
 
     if args.rq in {"all", "rq2"}:
         fig, table = run_rq2(
