@@ -49,7 +49,6 @@ class FlexScenario:
     name: str
     flex_share: float
     recovery_window_hours: float
-    selected_event_steps: int
     framing: str
     exploratory: bool = False
 
@@ -63,7 +62,6 @@ FLEX_SCENARIOS: tuple[FlexScenario, ...] = (
         name="Conservative Flex 10%",
         flex_share=0.10,
         recovery_window_hours=6.0,
-        selected_event_steps=2,
         framing="Conservative peer-reviewed case",
     ),
     FlexScenario(
@@ -71,7 +69,6 @@ FLEX_SCENARIOS: tuple[FlexScenario, ...] = (
         name="Exploratory Flex 25%",
         flex_share=0.25,
         recovery_window_hours=12.0,
-        selected_event_steps=6,
         framing="Exploratory upper-bound case",
         exploratory=True,
     ),
@@ -231,18 +228,15 @@ def apply_shiftable_flex_for_scenario(
             for i in day_idx
             if is_event_eligible(pd.Timestamp(work.loc[i, "timestamp"])) and base_load[i] > med_base[i] + 1e-12
         ]
-        if event_candidates:
-            event_candidates = sorted(
+        available_shift = np.maximum(0.0, np.minimum(load_flex_orig, base_load - med_base))
+        selected = np.asarray(
+            sorted(
                 event_candidates,
                 key=lambda i: (base_load[i] - med_base[i], base_load[i], i),
                 reverse=True,
-            )
-            selected = np.asarray(event_candidates[: min(len(event_candidates), scenario.selected_event_steps)], dtype=int)
-        else:
-            selected = np.asarray([], dtype=int)
-
-        event_selected[selected] = 1.0
-        available_shift = np.maximum(0.0, np.minimum(load_flex_orig, base_load - med_base))
+            ),
+            dtype=int,
+        )
         shiftable_target = float(available_shift[selected].sum()) if selected.size else 0.0
         realized = 0.0
         delay_weighted_sum = 0.0
@@ -304,6 +298,10 @@ def apply_shiftable_flex_for_scenario(
             if peak_realized <= 1e-12:
                 no_recovery_slots += 1
 
+        if selected.size:
+            active_selected = selected[shift_down[selected] > 1e-12]
+            event_selected[active_selected] = 1.0
+
         unmet = max(0.0, shiftable_target - realized)
         daily_rows.append(
             {
@@ -315,7 +313,8 @@ def apply_shiftable_flex_for_scenario(
                 "exploratory": scenario.exploratory,
                 "flex_share": float(scenario.flex_share),
                 "recovery_window_hours": float(scenario.recovery_window_hours),
-                "selected_event_steps": int(len(selected)),
+                "event_candidate_steps": int(len(selected)),
+                "active_shift_steps": int(np.sum(shift_down[day_idx] > 1e-12)),
                 "shiftable_target": float(shiftable_target),
                 "shiftable_realized": float(realized),
                 "shiftable_unmet": float(unmet),
