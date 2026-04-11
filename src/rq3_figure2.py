@@ -49,7 +49,7 @@ def _plot_figure2(
     )
     ax.plot(x, batt4, label=f"{flex_label} Flex + 4h Battery", linewidth=1.9, color="#d62728")
     ax.plot(x, batt8, label=f"{flex_label} Flex + 8h Battery", linewidth=1.9, color="#9467bd")
-    ax.axvspan(16, 36, color="#999999", alpha=0.08)
+    ax.axvspan(28, 44, color="#999999", alpha=0.08)
 
     add_peak_valley_shading(
         ax=ax,
