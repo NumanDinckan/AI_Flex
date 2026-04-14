@@ -253,6 +253,63 @@ def plot_rq1_year_overview(
     plt.close(fig)
 
 
+def plot_rq1_year_overview_left_panels(
+    centres_year_df: pd.DataFrame,
+    characteristic_day: pd.Timestamp,
+    year: int,
+    out_file: Path,
+) -> None:
+    char_profile, weekday_mean, weekend_mean, weekday_p10, weekday_p90 = _build_profiles(
+        centres_year_df,
+        characteristic_day=characteristic_day,
+    )
+    deltas = _center_hourly_delta_frame(centres_year_df)
+
+    fig, (ax1, ax2) = plt.subplots(2, 1, figsize=(12, 10), gridspec_kw={"height_ratios": [1.15, 1.0]})
+
+    x = np.arange(48)
+    ax1.fill_between(
+        x,
+        weekday_p10.to_numpy(dtype=float),
+        weekday_p90.to_numpy(dtype=float),
+        color="#9ecae1",
+        alpha=0.22,
+        label="Weekday p10-p90 (all 2025 weekdays)",
+    )
+    ax1.plot(x, weekday_mean.to_numpy(dtype=float), color="#1f77b4", linewidth=2.4, label="Typical weekday mean")
+    ax1.plot(x, weekend_mean.to_numpy(dtype=float), color="#ff7f0e", linewidth=2.2, label="Typical weekend mean")
+    ax1.plot(x, char_profile.to_numpy(dtype=float), color="#2f2f2f", linewidth=2.2, linestyle="--", label="Characteristic peak day")
+    ax1.set_title(f"RQ1 ({year}): Characteristic Day vs Typical Weekday/Weekend", fontsize=13, pad=12)
+    ax1.set_ylabel("utilisation")
+    ax1.set_xlabel("time of day (HH:MM)")
+    apply_granular_x_axis(ax1)
+    ax1.legend(loc="best", frameon=False)
+
+    box_data_jump = []
+    for hour in range(24):
+        vals = deltas.loc[deltas["hour"] == hour, "abs_delta_1h"].to_numpy(dtype=float)
+        box_data_jump.append(vals if vals.size else np.array([0.0]))
+
+    ax2.boxplot(
+        box_data_jump,
+        positions=np.arange(24),
+        widths=0.6,
+        showfliers=False,
+        patch_artist=True,
+        boxprops={"facecolor": "#c7dcef", "alpha": 0.8},
+    )
+    ax2.set_title(f"One-Hour Load Jump Distribution by Hour ({year})", fontsize=12, pad=10)
+    ax2.set_xlabel("hour of day")
+    ax2.set_ylabel("|delta_1h| utilisation")
+    ax2.set_xticks(np.arange(0, 24, 2))
+    ax2.set_xticklabels([f"{h:02d}" for h in range(0, 24, 2)])
+    ax2.grid(alpha=0.25)
+
+    fig.tight_layout()
+    fig.savefig(out_file, dpi=220)
+    plt.close(fig)
+
+
 def plot_rq1_center_load_jump_detail(
     centres_year_df: pd.DataFrame,
     metrics_df: pd.DataFrame,
@@ -327,6 +384,7 @@ def run_rq1(
     output_dir.mkdir(parents=True, exist_ok=True)
 
     figure_file = output_dir / "figure0_intro_typical_day_all_centres.png"
+    figure_file_left = output_dir / "figure0_intro_typical_day_all_centres_left.png"
     figure_file_center_jumps = output_dir / f"figure0_1_rq1_center_load_jumps_{year}.png"
     metrics_file = output_dir / f"rq1_center_variability_metrics_{year}.csv"
     bucket_file = output_dir / f"rq1_center_variability_bucket_summary_{year}.csv"
@@ -340,6 +398,12 @@ def run_rq1(
         metrics_df=metrics,
         year=year,
         out_file=figure_file,
+    )
+    plot_rq1_year_overview_left_panels(
+        centres_year_df=centres_year_df,
+        characteristic_day=characteristic_day,
+        year=year,
+        out_file=figure_file_left,
     )
     plot_rq1_center_load_jump_detail(
         centres_year_df=centres_year_df,
@@ -360,4 +424,4 @@ def run_rq1(
     )
     bucket_summary.to_csv(bucket_file, index=False)
 
-    return [figure_file, figure_file_center_jumps, metrics_file, bucket_file]
+    return [figure_file, figure_file_left, figure_file_center_jumps, metrics_file, bucket_file]
