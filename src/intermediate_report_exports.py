@@ -44,6 +44,12 @@ class ReportContext:
     battery_daily_stats: pd.DataFrame
 
 
+def get_rq_output_dir(base_output_dir: Path, rq_name: str) -> Path:
+    out = base_output_dir / rq_name
+    out.mkdir(parents=True, exist_ok=True)
+    return out
+
+
 def add_common_report_args(parser: argparse.ArgumentParser) -> argparse.ArgumentParser:
     parser.add_argument("--input", type=str, default="data/raw/ukpn-data-centre-demand-profiles.csv")
     parser.add_argument("--output-dir", type=str, default=".")
@@ -335,30 +341,33 @@ def main() -> None:
     if args.rq in {"all", "rq1"}:
         if context.centres_year_df is None:
             raise ValueError("RQ1 selected but centre-level year data is unavailable.")
+        rq1_output_dir = get_rq_output_dir(context.output_dir, "rq1")
         rq1_files = run_rq1(
             centres_year_df=context.centres_year_df,
             year=context.year,
             characteristic_day=context.characteristic_day,
-            output_dir=context.output_dir,
+            output_dir=rq1_output_dir,
         )
         saved_files.extend([str(p.resolve()) for p in rq1_files])
 
     if args.rq in {"all", "rq2"}:
+        rq2_output_dir = get_rq_output_dir(context.output_dir, "rq2")
         fig, table = run_rq2(
             day_df=context.day_df,
             year_df=context.year_df,
             flex_daily_stats=context.flex_daily_stats,
             year=context.year,
-            output_dir=context.output_dir,
+            output_dir=rq2_output_dir,
         )
         saved_files.extend([str(fig.resolve()), str(table.resolve())])
 
     if args.rq in {"all", "rq3"}:
+        rq3_output_dir = get_rq_output_dir(context.output_dir, "rq3")
         fig10, fig25, table = run_rq3(
             day_df=context.day_df,
             battery_daily_stats=context.battery_daily_stats,
             year=context.year,
-            output_dir=context.output_dir,
+            output_dir=rq3_output_dir,
         )
         saved_files.extend([str(fig10.resolve()), str(fig25.resolve()), str(table.resolve())])
 
