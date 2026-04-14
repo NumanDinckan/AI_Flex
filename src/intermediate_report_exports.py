@@ -24,6 +24,7 @@ REQUIRED_COLUMNS = [
 @dataclass
 class CoreAnalysisResults:
     battery_daily_stats: pd.DataFrame
+    flex_daily_stats: pd.DataFrame
     timeseries: pd.DataFrame
     characteristic_days: dict[int, pd.Timestamp]
 
@@ -32,17 +33,53 @@ class CoreAnalysisResults:
 class ReportContext:
     year: int
     min_utilisation: float
+    dt_hours: float
     output_dir: Path
     characteristic_day: pd.Timestamp
     day_df: pd.DataFrame
-    centres_day_df: pd.DataFrame
+    year_df: pd.DataFrame
+    centres_year_df: pd.DataFrame | None
+    flex_daily_stats: pd.DataFrame
     battery_daily_stats: pd.DataFrame
 
 
+@dataclass(frozen=True)
+class FlexScenario:
+    key: str
+    name: str
+    flex_share: float
+    recovery_window_hours: float
+    framing: str
+    exploratory: bool = False
+
+
+FLEX_EVENT_START_HOUR = 14.0
+FLEX_EVENT_END_HOUR = 22.0
+
+FLEX_SCENARIOS: tuple[FlexScenario, ...] = (
+    FlexScenario(
+        key="10",
+        name="Conservative Flex 10%",
+        flex_share=0.10,
+        recovery_window_hours=6.0,
+        framing="Conservative peer-reviewed case",
+    ),
+    FlexScenario(
+        key="25",
+        name="Exploratory Flex 25%",
+        flex_share=0.25,
+        recovery_window_hours=12.0,
+        framing="Exploratory upper-bound case",
+        exploratory=True,
+    ),
+)
+
+
 def add_common_report_args(parser: argparse.ArgumentParser) -> argparse.ArgumentParser:
-    parser.add_argument("--input", type=str, default="ukpn-data-centre-demand-profiles.csv")
+    parser.add_argument("--input", type=str, default="data/raw/ukpn-data-centre-demand-profiles.csv")
     parser.add_argument("--output-dir", type=str, default=".")
     parser.add_argument("--year", type=int, default=2025)
+    parser.add_argument("--dt-hours", type=float, default=0.5)
     parser.add_argument("--dc-type", type=str, default="")
     parser.add_argument("--voltage-level", type=str, default="High Voltage Import")
     parser.add_argument("--centres", type=str, default="")
@@ -155,139 +192,221 @@ def add_baselines(df: pd.DataFrame) -> pd.DataFrame:
     return out
 
 
-def distribute_to_valley_equal_with_capacity(
-    base_load: np.ndarray,
-    valley_idx: np.ndarray,
-    total_energy: float,
-) -> np.ndarray:
-    addition = np.zeros_like(base_load, dtype=float)
-    if total_energy <= 0 or valley_idx.size == 0:
-        return addition
-
-    remaining = float(total_energy)
-    active = valley_idx.copy()
-
-    while remaining > 1e-12 and active.size > 0:
-        cap = 1.0 - (base_load[active] + addition[active])
-        cap = np.maximum(cap, 0.0)
-        active = active[cap > 1e-12]
-        if active.size == 0:
-            break
-
-        cap = 1.0 - (base_load[active] + addition[active])
-        cap = np.maximum(cap, 0.0)
-        equal_share = remaining / float(active.size)
-        delta = np.minimum(cap, equal_share)
-        addition[active] += delta
-        remaining -= float(delta.sum())
-
-    return addition
+def is_event_eligible(timestamp: pd.Timestamp) -> bool:
+    hour = timestamp.hour + timestamp.minute / 60.0
+    return timestamp.weekday() < 5 and FLEX_EVENT_START_HOUR <= hour < FLEX_EVENT_END_HOUR
 
 
-def add_flex(df: pd.DataFrame) -> pd.DataFrame:
+def apply_shiftable_flex_for_scenario(
+    year_df: pd.DataFrame,
+    dt_hours: float,
+    scenario: FlexScenario,
+) -> tuple[dict[str, np.ndarray], pd.DataFrame]:
+    if dt_hours <= 0:
+        raise ValueError("dt_hours must be positive.")
+
+    work = year_df.sort_values("timestamp").reset_index()
+    base_load = work["utilisation"].to_numpy(dtype=float)
+    med_base = work["med_base"].to_numpy(dtype=float)
+    n = len(work)
+
+    load_total = base_load.copy()
+    load_inflex = (1.0 - scenario.flex_share) * base_load
+    load_flex_orig = scenario.flex_share * base_load
+    load_flex_shifted = load_flex_orig.copy()
+    shift_down = np.zeros(n, dtype=float)
+    shift_up = np.zeros(n, dtype=float)
+    event_selected = np.zeros(n, dtype=float)
+
+    recovery_steps = max(1, int(round(scenario.recovery_window_hours / dt_hours)))
+    daily_rows: list[dict[str, object]] = []
+
+    for date, day_frame in work.groupby(work["timestamp"].dt.floor("D"), sort=True):
+        day_idx = day_frame.index.to_numpy(dtype=int)
+        event_candidates = [
+            i
+            for i in day_idx
+            if is_event_eligible(pd.Timestamp(work.loc[i, "timestamp"])) and base_load[i] > med_base[i] + 1e-12
+        ]
+        available_shift = np.maximum(0.0, np.minimum(load_flex_orig, base_load - med_base))
+        selected = np.asarray(
+            sorted(
+                event_candidates,
+                key=lambda i: (base_load[i] - med_base[i], base_load[i], i),
+                reverse=True,
+            ),
+            dtype=int,
+        )
+        shiftable_target = float(available_shift[selected].sum()) if selected.size else 0.0
+        realized = 0.0
+        delay_weighted_sum = 0.0
+        saturated_recovery_slots: set[int] = set()
+        no_recovery_slots = 0
+
+        for peak_idx in selected:
+            amount = float(available_shift[peak_idx])
+            remaining = amount
+            if remaining <= 1e-12:
+                continue
+
+            recovery_candidates = []
+            for rec_idx in day_idx:
+                if rec_idx == peak_idx:
+                    continue
+                rec_ts = pd.Timestamp(work.loc[rec_idx, "timestamp"])
+                if is_event_eligible(rec_ts):
+                    continue
+                if abs(rec_idx - peak_idx) > recovery_steps:
+                    continue
+                recovery_candidates.append(rec_idx)
+
+            recovery_candidates.sort(
+                key=lambda i: (
+                    base_load[i],
+                    abs(i - peak_idx),
+                    i,
+                )
+            )
+            peak_realized = 0.0
+            for rec_idx in recovery_candidates:
+                if remaining <= 1e-12:
+                    break
+                median_gap_allowance = max(0.0, med_base[peak_idx] - med_base[rec_idx])
+                recovery_upper = min(
+                    base_load[rec_idx] + median_gap_allowance,
+                    (1.0 + scenario.flex_share) * base_load[rec_idx],
+                    1.0,
+                )
+                capacity = max(0.0, recovery_upper - load_total[rec_idx])
+                if capacity <= 1e-12:
+                    continue
+
+                delta = min(remaining, capacity)
+                load_total[peak_idx] -= delta
+                load_total[rec_idx] += delta
+                load_flex_shifted[peak_idx] -= delta
+                load_flex_shifted[rec_idx] += delta
+                shift_down[peak_idx] += delta
+                shift_up[rec_idx] += delta
+                remaining -= delta
+                peak_realized += delta
+                realized += delta
+                delay_weighted_sum += delta * ((rec_idx - peak_idx) * dt_hours)
+                if load_total[rec_idx] >= recovery_upper - 1e-10:
+                    saturated_recovery_slots.add(int(rec_idx))
+
+            if peak_realized <= 1e-12:
+                no_recovery_slots += 1
+
+        if selected.size:
+            active_selected = selected[shift_down[selected] > 1e-12]
+            event_selected[active_selected] = 1.0
+
+        unmet = max(0.0, shiftable_target - realized)
+        daily_rows.append(
+            {
+                "year": int(day_frame["year"].iloc[0]),
+                "date": pd.Timestamp(date),
+                "scenario_key": scenario.key,
+                "scenario_name": scenario.name,
+                "framing": scenario.framing,
+                "exploratory": scenario.exploratory,
+                "flex_share": float(scenario.flex_share),
+                "recovery_window_hours": float(scenario.recovery_window_hours),
+                "event_candidate_steps": int(len(selected)),
+                "active_shift_steps": int(np.sum(shift_down[day_idx] > 1e-12)),
+                "shiftable_target": float(shiftable_target),
+                "shiftable_realized": float(realized),
+                "shiftable_unmet": float(unmet),
+                "shifted_energy_utilisation_hours": float(realized * dt_hours),
+                "feasible_day": bool(unmet <= 1e-10),
+                "recovery_saturation_slots": int(len(saturated_recovery_slots)),
+                "average_deferment_hours": float(delay_weighted_sum / realized) if realized > 1e-12 else 0.0,
+                "used_eligible_flex_percent": float(realized / shiftable_target * 100.0) if shiftable_target > 1e-12 else 0.0,
+                "fully_recovered_percent": float(realized / shiftable_target * 100.0) if shiftable_target > 1e-12 else 0.0,
+                "no_recovery_slots": int(no_recovery_slots),
+                "active_event_day": bool(len(selected) > 0),
+            }
+        )
+
+    return (
+        {
+            "load_total": np.clip(load_total, 0.0, 1.0),
+            "load_inflex": load_inflex,
+            "load_flex_orig": load_flex_orig,
+            "load_flex_shifted": load_flex_shifted,
+            "shift_down": shift_down,
+            "shift_up": shift_up,
+            "event_selected": event_selected,
+            "row_index": work["index"].to_numpy(dtype=int),
+        },
+        pd.DataFrame(daily_rows),
+    )
+
+
+def add_flex(df: pd.DataFrame, dt_hours: float) -> tuple[pd.DataFrame, pd.DataFrame]:
     out = df.copy().sort_values(["year", "date", "halfhour_index", "timestamp"]).reset_index(drop=True)
 
     out["surplus"] = np.maximum(0.0, out["utilisation"] - out["med_base"])
     out["undersupply"] = np.maximum(0.0, out["med_base"] - out["utilisation"])
 
-    for col in [
-        "reduce_frac_10",
-        "reduce_frac_25",
-        "valley_shiftable_10",
-        "valley_shiftable_25",
-        "shift_down_10",
-        "shift_down_25",
-        "shift_up_10",
-        "shift_up_25",
-        "shiftable_10_target",
-        "shiftable_25_target",
-        "shiftable_10_realized",
-        "shiftable_25_realized",
-        "shiftable_10_unmet",
-        "shiftable_25_unmet",
-        "total_surplus_peak",
-        "load_flex_10",
-        "load_flex_25",
-    ]:
-        out[col] = 0.0
+    for suffix in ["10", "25"]:
+        for col in [
+            f"load_inflex_{suffix}",
+            f"load_flex_orig_{suffix}",
+            f"load_flex_shifted_{suffix}",
+            f"reduce_frac_{suffix}",
+            f"valley_shiftable_{suffix}",
+            f"shift_down_{suffix}",
+            f"shift_up_{suffix}",
+            f"shiftable_{suffix}_target",
+            f"shiftable_{suffix}_realized",
+            f"shiftable_{suffix}_unmet",
+            f"load_flex_{suffix}",
+            f"event_selected_{suffix}",
+        ]:
+            out[col] = 0.0
 
-    for _, g in out.groupby(["year", "date"], sort=True):
-        idx = g.index.to_numpy()
-        hh = g["halfhour_index"].to_numpy(dtype=int)
-        util = g["utilisation"].to_numpy(dtype=float)
-        med = g["med_base"].to_numpy(dtype=float)
-        surplus = np.maximum(0.0, util - med)
+    flex_daily_stats_parts: list[pd.DataFrame] = []
 
-        peak_mask = (hh >= 16) & (hh <= 36)
-        valley_mask = ~peak_mask
+    for _, year_df in out.groupby("year", sort=True):
+        for scenario in FLEX_SCENARIOS:
+            scenario_out, daily_stats = apply_shiftable_flex_for_scenario(year_df, dt_hours=dt_hours, scenario=scenario)
+            row_index = scenario_out["row_index"]
+            suffix = scenario.key
+            out.loc[row_index, f"load_inflex_{suffix}"] = scenario_out["load_inflex"]
+            out.loc[row_index, f"load_flex_orig_{suffix}"] = scenario_out["load_flex_orig"]
+            out.loc[row_index, f"load_flex_shifted_{suffix}"] = scenario_out["load_flex_shifted"]
+            out.loc[row_index, f"reduce_frac_{suffix}"] = scenario_out["shift_down"]
+            out.loc[row_index, f"valley_shiftable_{suffix}"] = scenario_out["shift_up"]
+            out.loc[row_index, f"shift_down_{suffix}"] = scenario_out["shift_down"]
+            out.loc[row_index, f"shift_up_{suffix}"] = scenario_out["shift_up"]
+            out.loc[row_index, f"load_flex_{suffix}"] = scenario_out["load_total"]
+            out.loc[row_index, f"event_selected_{suffix}"] = scenario_out["event_selected"]
 
-        peak_idx = np.where(peak_mask)[0]
-        valley_idx = np.where(valley_mask)[0]
+            day_metric_map = daily_stats.set_index("date") if not daily_stats.empty else pd.DataFrame()
+            if not daily_stats.empty:
+                out.loc[row_index, f"shiftable_{suffix}_target"] = out.loc[row_index, "date"].map(day_metric_map["shiftable_target"])
+                out.loc[row_index, f"shiftable_{suffix}_realized"] = out.loc[row_index, "date"].map(day_metric_map["shiftable_realized"])
+                out.loc[row_index, f"shiftable_{suffix}_unmet"] = out.loc[row_index, "date"].map(day_metric_map["shiftable_unmet"])
+                flex_daily_stats_parts.append(daily_stats)
 
-        total_surplus_peak = float(surplus[peak_idx].sum()) if peak_idx.size else 0.0
-        shiftable_10 = 0.10 * total_surplus_peak
-        shiftable_25 = 0.25 * total_surplus_peak
-
-        reduce_10 = np.zeros_like(util)
-        reduce_25 = np.zeros_like(util)
-
-        if total_surplus_peak > 0 and peak_idx.size > 0:
-            peak_weights = surplus[peak_idx] / total_surplus_peak
-            reduce_10[peak_idx] = peak_weights * shiftable_10
-            reduce_25[peak_idx] = peak_weights * shiftable_25
-
-        base_after_reduce_10 = util - reduce_10
-        base_after_reduce_25 = util - reduce_25
-
-        valley_add_10 = distribute_to_valley_equal_with_capacity(
-            base_load=base_after_reduce_10,
-            valley_idx=valley_idx,
-            total_energy=shiftable_10,
-        )
-        valley_add_25 = distribute_to_valley_equal_with_capacity(
-            base_load=base_after_reduce_25,
-            valley_idx=valley_idx,
-            total_energy=shiftable_25,
-        )
-
-        flex_10 = np.clip(base_after_reduce_10 + valley_add_10, 0.0, 1.0)
-        flex_25 = np.clip(base_after_reduce_25 + valley_add_25, 0.0, 1.0)
-
-        realized_10 = float(valley_add_10.sum())
-        realized_25 = float(valley_add_25.sum())
-
-        out.loc[idx, "reduce_frac_10"] = reduce_10
-        out.loc[idx, "reduce_frac_25"] = reduce_25
-        out.loc[idx, "valley_shiftable_10"] = valley_add_10
-        out.loc[idx, "valley_shiftable_25"] = valley_add_25
-        out.loc[idx, "shift_down_10"] = reduce_10
-        out.loc[idx, "shift_down_25"] = reduce_25
-        out.loc[idx, "shift_up_10"] = valley_add_10
-        out.loc[idx, "shift_up_25"] = valley_add_25
-        out.loc[idx, "shiftable_10_target"] = shiftable_10
-        out.loc[idx, "shiftable_25_target"] = shiftable_25
-        out.loc[idx, "shiftable_10_realized"] = realized_10
-        out.loc[idx, "shiftable_25_realized"] = realized_25
-        out.loc[idx, "shiftable_10_unmet"] = max(0.0, shiftable_10 - realized_10)
-        out.loc[idx, "shiftable_25_unmet"] = max(0.0, shiftable_25 - realized_25)
-        out.loc[idx, "total_surplus_peak"] = total_surplus_peak
-        out.loc[idx, "load_flex_10"] = flex_10
-        out.loc[idx, "load_flex_25"] = flex_25
-
+    rolling_window_steps = max(1, int(round(4.0 / dt_hours)))
     out["down_10_4h"] = (
-        out.groupby(["year", "date"])["reduce_frac_10"].rolling(window=8, min_periods=1).sum().reset_index(level=[0, 1], drop=True)
+        out.groupby(["year", "date"])["reduce_frac_10"].rolling(window=rolling_window_steps, min_periods=1).sum().reset_index(level=[0, 1], drop=True)
     )
     out["down_25_4h"] = (
-        out.groupby(["year", "date"])["reduce_frac_25"].rolling(window=8, min_periods=1).sum().reset_index(level=[0, 1], drop=True)
+        out.groupby(["year", "date"])["reduce_frac_25"].rolling(window=rolling_window_steps, min_periods=1).sum().reset_index(level=[0, 1], drop=True)
     )
     out["up_10_4h"] = (
-        out.groupby(["year", "date"])["valley_shiftable_10"].rolling(window=8, min_periods=1).sum().reset_index(level=[0, 1], drop=True)
+        out.groupby(["year", "date"])["valley_shiftable_10"].rolling(window=rolling_window_steps, min_periods=1).sum().reset_index(level=[0, 1], drop=True)
     )
     out["up_25_4h"] = (
-        out.groupby(["year", "date"])["valley_shiftable_25"].rolling(window=8, min_periods=1).sum().reset_index(level=[0, 1], drop=True)
+        out.groupby(["year", "date"])["valley_shiftable_25"].rolling(window=rolling_window_steps, min_periods=1).sum().reset_index(level=[0, 1], drop=True)
     )
 
-    return out
+    flex_daily_stats = pd.concat(flex_daily_stats_parts, ignore_index=True) if flex_daily_stats_parts else pd.DataFrame()
+    return out, flex_daily_stats
 
 
 def simulate_bess_day(
@@ -521,15 +640,16 @@ def find_characteristic_days(df: pd.DataFrame) -> dict[int, pd.Timestamp]:
     return characteristic
 
 
-def run_core_analysis(df: pd.DataFrame) -> CoreAnalysisResults:
+def run_core_analysis(df: pd.DataFrame, dt_hours: float) -> CoreAnalysisResults:
     ts = prepare_features(df)
     ts = add_baselines(ts)
-    ts = add_flex(ts)
+    ts, flex_daily_stats = add_flex(ts, dt_hours=dt_hours)
     ts, battery_daily_stats = simulate_bess(ts)
     characteristic_days = find_characteristic_days(ts)
 
     return CoreAnalysisResults(
         battery_daily_stats=battery_daily_stats,
+        flex_daily_stats=flex_daily_stats,
         timeseries=ts,
         characteristic_days=characteristic_days,
     )
@@ -596,7 +716,10 @@ def load_centre_year_timeseries(
     return pd.concat(parts, ignore_index=True)
 
 
-def build_context(args: argparse.Namespace) -> ReportContext:
+def build_context(args: argparse.Namespace, include_rq1_data: bool) -> ReportContext:
+    if args.dt_hours <= 0:
+        raise ValueError("--dt-hours must be positive.")
+
     output_dir = Path(args.output_dir)
     output_dir.mkdir(parents=True, exist_ok=True)
 
@@ -613,7 +736,7 @@ def build_context(args: argparse.Namespace) -> ReportContext:
         chunksize=args.chunksize,
     )
 
-    results = run_core_analysis(df)
+    results = run_core_analysis(df, dt_hours=args.dt_hours)
 
     if args.year not in results.characteristic_days:
         available = sorted(results.characteristic_days.keys())
@@ -624,27 +747,34 @@ def build_context(args: argparse.Namespace) -> ReportContext:
     day_df = results.timeseries[
         (results.timeseries["year"] == args.year) & (results.timeseries["date"] == characteristic_day)
     ].sort_values("halfhour_index")
+    year_df = results.timeseries[results.timeseries["year"] == args.year].sort_values("timestamp").copy()
+    flex_daily_stats = results.flex_daily_stats[results.flex_daily_stats["year"] == args.year].copy()
 
     if day_df.empty:
         raise ValueError(f"No characteristic-day data found for year {args.year}.")
 
-    centres_day_df = load_centre_year_timeseries(
-        csv_path=input_csv,
-        year=args.year,
-        target_date=characteristic_day,
-        dc_type=args.dc_type.strip() if args.dc_type else None,
-        voltage_level=args.voltage_level.strip() if args.voltage_level else None,
-        min_utilisation=args.min_utilisation,
-        chunksize=args.chunksize,
-    )
+    centres_year_df: pd.DataFrame | None = None
+    if include_rq1_data:
+        centres_year_df = load_centre_year_timeseries(
+            csv_path=input_csv,
+            year=args.year,
+            target_date=None,
+            dc_type=args.dc_type.strip() if args.dc_type else None,
+            voltage_level=args.voltage_level.strip() if args.voltage_level else None,
+            min_utilisation=args.min_utilisation,
+            chunksize=args.chunksize,
+        )
 
     return ReportContext(
         year=args.year,
         min_utilisation=args.min_utilisation,
+        dt_hours=args.dt_hours,
         output_dir=output_dir,
         characteristic_day=characteristic_day,
         day_df=day_df,
-        centres_day_df=centres_day_df,
+        year_df=year_df,
+        centres_year_df=centres_year_df,
+        flex_daily_stats=flex_daily_stats,
         battery_daily_stats=results.battery_daily_stats,
     )
 
@@ -663,26 +793,27 @@ def parse_args() -> argparse.Namespace:
 
 def main() -> None:
     args = parse_args()
-    context = build_context(args)
+    include_rq1_data = args.rq in {"all", "rq1"}
+    context = build_context(args, include_rq1_data=include_rq1_data)
 
     saved_files: list[str] = []
 
     if args.rq in {"all", "rq1"}:
-        saved_files.append(
-            str(
-                run_rq1(
-                    day_df=context.day_df,
-                    centres_day_df=context.centres_day_df,
-                    year=context.year,
-                    characteristic_day=context.characteristic_day,
-                    output_dir=context.output_dir,
-                ).resolve()
-            )
+        if context.centres_year_df is None:
+            raise ValueError("RQ1 selected but centre-level year data is unavailable.")
+        rq1_files = run_rq1(
+            centres_year_df=context.centres_year_df,
+            year=context.year,
+            characteristic_day=context.characteristic_day,
+            output_dir=context.output_dir,
         )
+        saved_files.extend([str(p.resolve()) for p in rq1_files])
 
     if args.rq in {"all", "rq2"}:
         fig, table = run_rq2(
             day_df=context.day_df,
+            year_df=context.year_df,
+            flex_daily_stats=context.flex_daily_stats,
             year=context.year,
             output_dir=context.output_dir,
         )
@@ -701,6 +832,7 @@ def main() -> None:
     print(f"Year selected: {context.year}")
     print(f"Characteristic day: {context.characteristic_day.date()}")
     print(f"Min utilisation filter: > {context.min_utilisation}")
+    print(f"dt_hours: {context.dt_hours}")
     for path in saved_files:
         print(f"Saved: {path}")
 
