@@ -6,7 +6,8 @@
 - `outputs/rq1/` RQ1 figures and CSVs
 - `outputs/rq2/` RQ2 figures and CSVs
 - `outputs/rq3/` RQ3 figures and CSVs
-- `data/raw/` local raw dataset (ignored in git)
+- `data/raw/ukpn-data-centre-demand-profiles.csv.gz` compressed shared dataset committed to git
+- `data/raw/ukpn-data-centre-demand-profiles.csv` optional local uncompressed copy
 - `archive/` legacy files
 
 ## Run
@@ -33,6 +34,6 @@ python src/intermediate_report_exports.py --rq rq3 --year 2025
 ## Input Data
 Default input path now is:
 
-`data/raw/ukpn-data-centre-demand-profiles.csv`
+`data/raw/ukpn-data-centre-demand-profiles.csv.gz`
 
 If your dataset is elsewhere, pass `--input <path>`.

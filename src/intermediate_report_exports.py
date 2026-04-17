@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import argparse
+import gzip
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -51,7 +52,7 @@ def get_rq_output_dir(base_output_dir: Path, rq_name: str) -> Path:
 
 
 def add_common_report_args(parser: argparse.ArgumentParser) -> argparse.ArgumentParser:
-    parser.add_argument("--input", type=str, default="data/raw/ukpn-data-centre-demand-profiles.csv")
+    parser.add_argument("--input", type=str, default="data/raw/ukpn-data-centre-demand-profiles.csv.gz")
     parser.add_argument("--output-dir", type=str, default=".")
     parser.add_argument("--year", type=int, default=2025)
     parser.add_argument("--dt-hours", type=float, default=0.5)
@@ -69,7 +70,8 @@ def add_common_report_args(parser: argparse.ArgumentParser) -> argparse.Argument
 
 
 def detect_delimiter(csv_path: Path) -> str:
-    with csv_path.open("r", encoding="utf-8-sig", newline="") as f:
+    open_fn = gzip.open if csv_path.suffix == ".gz" else csv_path.open
+    with open_fn(csv_path, "rt", encoding="utf-8-sig", newline="") as f:
         first_line = f.readline()
     return ";" if first_line.count(";") > first_line.count(",") else ","
 

@@ -12,8 +12,9 @@ venv/
 # Generated report outputs
 outputs/
 
-# Large/raw local data (not for GitHub)
-data/raw/
+# Large/raw local data
+data/raw/*
+!data/raw/ukpn-data-centre-demand-profiles.csv.gz
 
 # Archive / legacy scratch
 archive/

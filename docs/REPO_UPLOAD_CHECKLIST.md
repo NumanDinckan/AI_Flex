@@ -22,6 +22,11 @@ Optional delete (recommended for clean repo):
 
 - `ukpn-data-centre-demand-profiles.csv` (about 579MB)
 
+## Shared Dataset For GitHub
+
+- Commit `data/raw/ukpn-data-centre-demand-profiles.csv.gz` instead.
+- The compressed file is small enough for standard GitHub storage and the scripts can read it directly.
+
 GitHub blocks files larger than 100MB.
 
 ## Keep In Repo
