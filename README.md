@@ -37,3 +37,9 @@ Default input path now is:
 `data/raw/ukpn-data-centre-demand-profiles.csv.gz`
 
 If your dataset is elsewhere, pass `--input <path>`.
+
+## Docs
+- `docs/RQ1_HANDOFF_NOTES.md`
+- `docs/RQ2_METHOD_NOTES.md`
+- `docs/RQ3_METHOD_NOTES.md`
+- `docs/FINAL_REPORT_ALIGNMENT_NOTES.md`

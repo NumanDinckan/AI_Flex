@@ -1,214 +1,524 @@
 from __future__ import annotations
 
+from dataclasses import dataclass
+
 import numpy as np
 import pandas as pd
+from scipy.optimize import linprog
 
 
-def simulate_bess_day(
-    base_load: np.ndarray,
-    med_base: np.ndarray,
-    halfhour_index: np.ndarray,
+SOC_MIN_FRACTION = 0.10
+SOC_MAX_FRACTION = 0.90
+ROUND_TRIP_EFFICIENCY = 0.90
+BESS_HORIZON_DAYS = 2
+
+
+@dataclass(frozen=True)
+class BessScenario:
+    scenario: str
+    battery_duration: str
+    duration_hours: float
+    flex_col: str
+    load_col: str
+    soc_col: str
+    charge_col: str
+    discharge_col: str
+    net_power_col: str
+
+
+BESS_SCENARIOS: tuple[BessScenario, ...] = (
+    BessScenario(
+        scenario="10%_flex + 4h-Battery",
+        battery_duration="4h",
+        duration_hours=4.0,
+        flex_col="load_flex_10",
+        load_col="load_10_flex_4h_batt",
+        soc_col="soc_10_flex_4h_batt",
+        charge_col="charge_10_flex_4h_batt",
+        discharge_col="discharge_10_flex_4h_batt",
+        net_power_col="net_batt_10_flex_4h_batt",
+    ),
+    BessScenario(
+        scenario="10%_flex + 8h-Battery",
+        battery_duration="8h",
+        duration_hours=8.0,
+        flex_col="load_flex_10",
+        load_col="load_10_flex_8h_batt",
+        soc_col="soc_10_flex_8h_batt",
+        charge_col="charge_10_flex_8h_batt",
+        discharge_col="discharge_10_flex_8h_batt",
+        net_power_col="net_batt_10_flex_8h_batt",
+    ),
+    BessScenario(
+        scenario="25%_flex + 4h-Battery",
+        battery_duration="4h",
+        duration_hours=4.0,
+        flex_col="load_flex_25",
+        load_col="load_25_flex_4h_batt",
+        soc_col="soc_25_flex_4h_batt",
+        charge_col="charge_25_flex_4h_batt",
+        discharge_col="discharge_25_flex_4h_batt",
+        net_power_col="net_batt_25_flex_4h_batt",
+    ),
+    BessScenario(
+        scenario="25%_flex + 8h-Battery",
+        battery_duration="8h",
+        duration_hours=8.0,
+        flex_col="load_flex_25",
+        load_col="load_25_flex_8h_batt",
+        soc_col="soc_25_flex_8h_batt",
+        charge_col="charge_25_flex_8h_batt",
+        discharge_col="discharge_25_flex_8h_batt",
+        net_power_col="net_batt_25_flex_8h_batt",
+    ),
+)
+
+
+def _clip_soc(value: float, battery_energy: float) -> float:
+    soc_min = SOC_MIN_FRACTION * battery_energy
+    soc_max = SOC_MAX_FRACTION * battery_energy
+    return float(np.clip(value, soc_min, soc_max))
+
+
+def simulate_peak_cap_dispatch(
+    load: np.ndarray,
+    target_power: float,
     battery_power: float,
     battery_energy: float,
-    response_factor: float = 0.25,
-    round_trip_eff: float = 0.90,
-    step_h: float = 0.5,
-) -> dict[str, np.ndarray | float | list[int]]:
-    load = base_load.copy().astype(float)
-    n = load.size
+    initial_soc: float,
+    terminal_soc_target: float,
+    step_h: float,
+    round_trip_eff: float = ROUND_TRIP_EFFICIENCY,
+) -> dict[str, np.ndarray | float | bool]:
+    base_load = np.asarray(load, dtype=float)
+    n = base_load.size
 
-    soc = np.zeros(n, dtype=float)
-    charge_p = np.zeros(n, dtype=float)
-    discharge_p = np.zeros(n, dtype=float)
+    grid_load = base_load.copy()
+    soc_trace = np.zeros(n, dtype=float)
+    charge_power = np.zeros(n, dtype=float)
+    discharge_power = np.zeros(n, dtype=float)
 
-    if battery_power <= 0 or battery_energy <= 0 or n == 0:
+    if n == 0 or battery_power <= 0 or battery_energy <= 0 or step_h <= 0:
         return {
-            "load": load,
-            "soc": soc,
+            "grid_load": grid_load,
+            "soc": soc_trace,
+            "charge_power": charge_power,
+            "discharge_power": discharge_power,
+            "net_battery_power": discharge_power - charge_power,
             "total_charge": 0.0,
             "total_discharge": 0.0,
             "cycles": 0.0,
+            "final_soc": 0.0,
+            "min_soc": 0.0,
             "max_soc": 0.0,
-            "mean_soc": 0.0,
-            "discharge_threshold": 0.0,
-            "charge_threshold": 0.0,
-            "dynamic_peak_region": [],
-            "dynamic_valley_region": [],
-            "response_factor": float(response_factor),
+            "target_power": float(target_power),
+            "feasible": bool(np.max(base_load) <= target_power + 1e-10),
         }
 
-    day_median = float(np.median(load))
-    day_std = float(np.std(load, ddof=0))
-    discharge_th = day_median + 0.15 * day_std
-    charge_th = day_median - 0.15 * day_std
+    eta = float(np.sqrt(round_trip_eff))
+    soc_min = SOC_MIN_FRACTION * battery_energy
+    soc_max = SOC_MAX_FRACTION * battery_energy
+    soc = _clip_soc(initial_soc, battery_energy)
+    terminal_target = _clip_soc(terminal_soc_target, battery_energy)
 
-    k = max(1, int(np.ceil(0.20 * n)))
-    hh = halfhour_index.astype(int)
+    for i, base in enumerate(base_load):
+        discharge_needed = max(base - target_power, 0.0)
+        max_discharge = min(battery_power, max(0.0, (soc - soc_min) * eta / step_h))
+        discharge = min(discharge_needed, max_discharge)
 
-    order = np.argsort(hh)
-    hh_sorted = hh[order]
-    load_sorted = load[order]
+        charge = 0.0
+        if base < target_power:
+            charge_room = target_power - base
+            max_charge = min(battery_power, max(0.0, (soc_max - soc) / (eta * step_h)))
+            charge = min(charge_room, max_charge)
 
-    def choose_connected_region(values: np.ndarray, hh_idx: np.ndarray, width: int, pick_peak: bool) -> np.ndarray:
-        best: np.ndarray | None = None
-        best_score = -np.inf if pick_peak else np.inf
+        soc += charge * step_h * eta
+        soc -= discharge * step_h / eta
+        soc = float(np.clip(soc, soc_min, soc_max))
 
-        if values.size >= width:
-            for start in range(0, values.size - width + 1):
-                block_hh = hh_idx[start : start + width]
-                if not np.all(np.diff(block_hh) == 1):
-                    continue
-                block_vals = values[start : start + width]
-                score = float(block_vals.sum())
-                if (pick_peak and score > best_score) or ((not pick_peak) and score < best_score):
-                    best_score = score
-                    best = block_hh
+        charge_power[i] = charge
+        discharge_power[i] = discharge
+        grid_load[i] = base + charge - discharge
+        soc_trace[i] = soc
 
-        if best is not None:
-            return np.asarray(best, dtype=int)
-
-        if pick_peak:
-            pick_idx = np.argsort(values)[-width:]
-        else:
-            pick_idx = np.argsort(values)[:width]
-        return np.sort(hh_idx[pick_idx].astype(int))
-
-    peak_region_hh = choose_connected_region(load_sorted, hh_sorted, k, pick_peak=True)
-    valley_region_hh = choose_connected_region(load_sorted, hh_sorted, k, pick_peak=False)
-
-    peak_region_set = set(int(v) for v in peak_region_hh.tolist())
-    valley_region_set = set(int(v) for v in valley_region_hh.tolist())
-
-    current_soc = 0.5 * battery_energy
-
-    for i in range(n):
-        l = float(load[i])
-        hh_val = int(halfhour_index[i])
-        _ = med_base[i]
-
-        is_peak_region = hh_val in peak_region_set
-        is_valley_region = hh_val in valley_region_set
-
-        if is_peak_region and current_soc > 0.1 * battery_energy and l >= discharge_th:
-            available_energy_step = max(current_soc - 0.1 * battery_energy, 0.0) * 0.9
-            max_discharge_power_step = available_energy_step / step_h
-            dynamic_excess = max(0.0, l - discharge_th)
-            p = min(battery_power, max_discharge_power_step, response_factor * dynamic_excess)
-            if p > 0:
-                current_soc -= p * step_h / round_trip_eff
-                l -= p
-                discharge_p[i] = p
-
-        elif is_valley_region and current_soc < 0.9 * battery_energy and l <= charge_th:
-            available_capacity_step = max(0.9 * battery_energy - current_soc, 0.0) * 0.9
-            max_charge_power_step = available_capacity_step / step_h
-            dynamic_gap = max(0.0, charge_th - l)
-            p = min(battery_power, max_charge_power_step, response_factor * dynamic_gap)
-            if p > 0:
-                current_soc += p * step_h * round_trip_eff
-                l += p
-                charge_p[i] = p
-
-        current_soc = min(max(current_soc, 0.0), battery_energy)
-        load[i] = min(max(l, 0.0), 1.0)
-        soc[i] = current_soc
-
-    total_charge = float(np.sum(charge_p) * step_h)
-    total_discharge = float(np.sum(discharge_p) * step_h)
+    total_charge = float(charge_power.sum() * step_h)
+    total_discharge = float(discharge_power.sum() * step_h)
     cycles = float((total_charge + total_discharge) / (2.0 * battery_energy)) if battery_energy > 0 else 0.0
+    feasible = bool(grid_load.max() <= target_power + 1e-6 and soc_trace[-1] >= terminal_target - 1e-6)
 
     return {
-        "load": load,
-        "soc": soc,
+        "grid_load": grid_load,
+        "soc": soc_trace,
+        "charge_power": charge_power,
+        "discharge_power": discharge_power,
+        "net_battery_power": discharge_power - charge_power,
         "total_charge": total_charge,
         "total_discharge": total_discharge,
         "cycles": cycles,
-        "max_soc": float(np.max(soc)),
-        "mean_soc": float(np.mean(soc)),
-        "discharge_threshold": float(discharge_th),
-        "charge_threshold": float(charge_th),
-        "dynamic_peak_region": peak_region_hh.tolist(),
-        "dynamic_valley_region": valley_region_hh.tolist(),
-        "response_factor": float(response_factor),
+        "final_soc": float(soc_trace[-1]),
+        "min_soc": float(soc_trace.min()),
+        "max_soc": float(soc_trace.max()),
+        "target_power": float(target_power),
+        "feasible": feasible,
     }
 
 
-def simulate_bess(df: pd.DataFrame) -> tuple[pd.DataFrame, pd.DataFrame]:
+def find_optimal_peak_target(
+    load: np.ndarray,
+    battery_power: float,
+    battery_energy: float,
+    initial_soc: float,
+    terminal_soc_target: float,
+    step_h: float,
+    round_trip_eff: float = ROUND_TRIP_EFFICIENCY,
+    tol: float = 1e-4,
+) -> dict[str, np.ndarray | float | bool]:
+    base_load = np.asarray(load, dtype=float)
+    if base_load.size == 0:
+        return simulate_peak_cap_dispatch(
+            load=base_load,
+            target_power=0.0,
+            battery_power=battery_power,
+            battery_energy=battery_energy,
+            initial_soc=initial_soc,
+            terminal_soc_target=terminal_soc_target,
+            step_h=step_h,
+            round_trip_eff=round_trip_eff,
+        )
+
+    lower = max(float(base_load.mean()), float(base_load.max() - battery_power), 0.0)
+    upper = float(base_load.max())
+
+    best = simulate_peak_cap_dispatch(
+        load=base_load,
+        target_power=upper,
+        battery_power=battery_power,
+        battery_energy=battery_energy,
+        initial_soc=initial_soc,
+        terminal_soc_target=terminal_soc_target,
+        step_h=step_h,
+        round_trip_eff=round_trip_eff,
+    )
+
+    for _ in range(50):
+        if upper - lower <= tol:
+            break
+        mid = 0.5 * (lower + upper)
+        candidate = simulate_peak_cap_dispatch(
+            load=base_load,
+            target_power=mid,
+            battery_power=battery_power,
+            battery_energy=battery_energy,
+            initial_soc=initial_soc,
+            terminal_soc_target=terminal_soc_target,
+            step_h=step_h,
+            round_trip_eff=round_trip_eff,
+        )
+        if bool(candidate["feasible"]):
+            upper = mid
+            best = candidate
+        else:
+            lower = mid
+
+    return best
+
+
+def solve_peak_cap_dispatch_lp(
+    load: np.ndarray,
+    battery_power: float,
+    battery_energy: float,
+    initial_soc: float,
+    terminal_soc_target: float,
+    historical_peak: float,
+    step_h: float,
+    round_trip_eff: float = ROUND_TRIP_EFFICIENCY,
+    peak_tol: float = 1e-5,
+    slack_tol: float = 1e-6,
+) -> dict[str, np.ndarray | float | bool]:
+    base_load = np.asarray(load, dtype=float)
+    n = base_load.size
+    if n == 0 or battery_power <= 0 or battery_energy <= 0 or step_h <= 0:
+        return simulate_peak_cap_dispatch(
+            load=base_load,
+            target_power=float(historical_peak),
+            battery_power=battery_power,
+            battery_energy=battery_energy,
+            initial_soc=initial_soc,
+            terminal_soc_target=terminal_soc_target,
+            step_h=step_h,
+            round_trip_eff=round_trip_eff,
+        )
+
+    eta = float(np.sqrt(round_trip_eff))
+    soc_min = SOC_MIN_FRACTION * battery_energy
+    soc_max = SOC_MAX_FRACTION * battery_energy
+    initial_soc = _clip_soc(initial_soc, battery_energy)
+    terminal_soc_target = _clip_soc(terminal_soc_target, battery_energy)
+
+    idx_m = 0
+    idx_c = 1
+    idx_d = idx_c + n
+    idx_e = idx_d + n
+    idx_sp = idx_e + n
+    idx_sm = idx_sp + 1
+    var_count = idx_sm + 1
+
+    def charge_idx(t: int) -> int:
+        return idx_c + t
+
+    def discharge_idx(t: int) -> int:
+        return idx_d + t
+
+    def energy_idx(t: int) -> int:
+        return idx_e + t
+
+    peak_upper_bound = max(float(base_load.max()), float(historical_peak), 0.0)
+    bounds: list[tuple[float | None, float | None]] = [(max(float(historical_peak), 0.0), peak_upper_bound)]
+    bounds.extend([(0.0, float(battery_power))] * n)
+    bounds.extend([(0.0, float(battery_power))] * n)
+    bounds.extend([(float(soc_min), float(soc_max))] * n)
+    bounds.extend([(0.0, None), (0.0, None)])
+
+    a_ub_rows: list[np.ndarray] = []
+    b_ub_rows: list[float] = []
+
+    for t, load_t in enumerate(base_load):
+        peak_row = np.zeros(var_count, dtype=float)
+        peak_row[idx_m] = -1.0
+        peak_row[charge_idx(t)] = 1.0
+        peak_row[discharge_idx(t)] = -1.0
+        a_ub_rows.append(peak_row)
+        b_ub_rows.append(-float(load_t))
+
+        no_export_row = np.zeros(var_count, dtype=float)
+        no_export_row[charge_idx(t)] = -1.0
+        no_export_row[discharge_idx(t)] = 1.0
+        a_ub_rows.append(no_export_row)
+        b_ub_rows.append(float(load_t))
+
+    a_eq_rows: list[np.ndarray] = []
+    b_eq_rows: list[float] = []
+
+    for t in range(n):
+        dyn_row = np.zeros(var_count, dtype=float)
+        dyn_row[charge_idx(t)] = -eta * step_h
+        dyn_row[discharge_idx(t)] = step_h / eta
+        dyn_row[energy_idx(t)] = 1.0
+        if t > 0:
+            dyn_row[energy_idx(t - 1)] = -1.0
+            rhs = 0.0
+        else:
+            rhs = float(initial_soc)
+        a_eq_rows.append(dyn_row)
+        b_eq_rows.append(rhs)
+
+    terminal_row = np.zeros(var_count, dtype=float)
+    terminal_row[energy_idx(n - 1)] = 1.0
+    terminal_row[idx_sp] = -1.0
+    terminal_row[idx_sm] = 1.0
+    a_eq_rows.append(terminal_row)
+    b_eq_rows.append(float(terminal_soc_target))
+
+    a_ub = np.vstack(a_ub_rows) if a_ub_rows else None
+    b_ub = np.asarray(b_ub_rows, dtype=float) if b_ub_rows else None
+    a_eq = np.vstack(a_eq_rows)
+    b_eq = np.asarray(b_eq_rows, dtype=float)
+
+    def solve_lp(
+        objective: np.ndarray,
+        extra_a_ub: list[np.ndarray] | None = None,
+        extra_b_ub: list[float] | None = None,
+    ):
+        if extra_a_ub:
+            full_a_ub = np.vstack([a_ub, *extra_a_ub]) if a_ub is not None else np.vstack(extra_a_ub)
+            full_b_ub = np.concatenate([b_ub, np.asarray(extra_b_ub, dtype=float)]) if b_ub is not None else np.asarray(extra_b_ub, dtype=float)
+        else:
+            full_a_ub = a_ub
+            full_b_ub = b_ub
+        return linprog(
+            c=objective,
+            A_ub=full_a_ub,
+            b_ub=full_b_ub,
+            A_eq=a_eq,
+            b_eq=b_eq,
+            bounds=bounds,
+            method="highs",
+        )
+
+    stage1_obj = np.zeros(var_count, dtype=float)
+    stage1_obj[idx_m] = 1.0
+    stage1 = solve_lp(stage1_obj)
+    if not stage1.success:
+        raise RuntimeError(stage1.message)
+    m_star = float(stage1.x[idx_m])
+
+    cap_row = np.zeros(var_count, dtype=float)
+    cap_row[idx_m] = 1.0
+    stage2_obj = np.zeros(var_count, dtype=float)
+    stage2_obj[idx_sp] = 1.0
+    stage2_obj[idx_sm] = 1.0
+    stage2 = solve_lp(stage2_obj, extra_a_ub=[cap_row], extra_b_ub=[m_star + peak_tol])
+    if not stage2.success:
+        raise RuntimeError(stage2.message)
+    slack_star = float(stage2.x[idx_sp] + stage2.x[idx_sm])
+
+    slack_row = np.zeros(var_count, dtype=float)
+    slack_row[idx_sp] = 1.0
+    slack_row[idx_sm] = 1.0
+    stage3_obj = np.zeros(var_count, dtype=float)
+    stage3_obj[idx_c:idx_d] = step_h
+    stage3_obj[idx_d:idx_e] = step_h
+    stage3 = solve_lp(
+        stage3_obj,
+        extra_a_ub=[cap_row, slack_row],
+        extra_b_ub=[m_star + peak_tol, slack_star + slack_tol],
+    )
+    if not stage3.success:
+        raise RuntimeError(stage3.message)
+
+    solution = stage3.x
+    charge_power = solution[idx_c:idx_d]
+    discharge_power = solution[idx_d:idx_e]
+    soc_trace = solution[idx_e:idx_sp]
+    grid_load = base_load + charge_power - discharge_power
+    total_charge = float(charge_power.sum() * step_h)
+    total_discharge = float(discharge_power.sum() * step_h)
+    cycles = float((total_charge + total_discharge) / (2.0 * battery_energy)) if battery_energy > 0 else 0.0
+
+    return {
+        "grid_load": grid_load,
+        "soc": soc_trace,
+        "charge_power": charge_power,
+        "discharge_power": discharge_power,
+        "net_battery_power": discharge_power - charge_power,
+        "total_charge": total_charge,
+        "total_discharge": total_discharge,
+        "cycles": cycles,
+        "final_soc": float(soc_trace[-1]),
+        "min_soc": float(soc_trace.min()),
+        "max_soc": float(soc_trace.max()),
+        "target_power": m_star,
+        "terminal_slack": slack_star,
+        "feasible": True,
+    }
+
+
+def simulate_bess(df: pd.DataFrame, step_h: float = 0.5) -> tuple[pd.DataFrame, pd.DataFrame]:
     out = df.copy().sort_values(["year", "date", "halfhour_index", "timestamp"]).reset_index(drop=True)
 
-    for col in [
-        "load_10_flex_4h_batt",
-        "load_10_flex_8h_batt",
-        "load_25_flex_4h_batt",
-        "load_25_flex_8h_batt",
-        "soc_10_flex_4h_batt",
-        "soc_10_flex_8h_batt",
-        "soc_25_flex_4h_batt",
-        "soc_25_flex_8h_batt",
-    ]:
-        out[col] = np.nan
+    for scenario in BESS_SCENARIOS:
+        for col in [
+            scenario.load_col,
+            scenario.soc_col,
+            scenario.charge_col,
+            scenario.discharge_col,
+            scenario.net_power_col,
+        ]:
+            out[col] = np.nan
 
     battery_rows: list[dict[str, float | int | str | pd.Timestamp]] = []
 
     for year, gy in out.groupby("year", sort=True):
         year_peak = float(gy["utilisation"].max())
         battery_power = 0.25 * year_peak
-        battery_energy_4h = battery_power * 4.0
-        battery_energy_8h = battery_power * 8.0
-        base_energy = max(battery_power * 4.0, 1e-12)
-        response_4h = 0.25 * (battery_energy_4h / base_energy)
-        response_8h = 0.25 * (battery_energy_8h / base_energy)
 
-        for day, gd in gy.groupby("date", sort=True):
-            idx = gd.index.to_numpy()
-            base = gd["med_base"].to_numpy(dtype=float)
-            hh = gd["halfhour_index"].to_numpy(dtype=int)
+        day_groups = [(pd.Timestamp(date), day_df.index.to_numpy()) for date, day_df in gy.groupby("date", sort=True)]
+        index_by_date = {date: idx for date, idx in day_groups}
+        dates = [date for date, _ in day_groups]
 
-            l10 = gd["load_flex_10"].to_numpy(dtype=float)
-            l25 = gd["load_flex_25"].to_numpy(dtype=float)
+        for scenario in BESS_SCENARIOS:
+            battery_energy = battery_power * scenario.duration_hours
+            current_soc = 0.5 * battery_energy
+            historical_peak = 0.0
 
-            s10_4 = simulate_bess_day(l10, base, hh, battery_power, battery_energy_4h, response_factor=response_4h)
-            s10_8 = simulate_bess_day(l10, base, hh, battery_power, battery_energy_8h, response_factor=response_8h)
-            s25_4 = simulate_bess_day(l25, base, hh, battery_power, battery_energy_4h, response_factor=response_4h)
-            s25_8 = simulate_bess_day(l25, base, hh, battery_power, battery_energy_8h, response_factor=response_8h)
+            for day_pos, date in enumerate(dates):
+                exec_idx = index_by_date[date]
+                horizon_dates = dates[day_pos : day_pos + BESS_HORIZON_DAYS]
+                horizon_idx = np.concatenate([index_by_date[d] for d in horizon_dates])
 
-            out.loc[idx, "load_10_flex_4h_batt"] = np.asarray(s10_4["load"], dtype=float)
-            out.loc[idx, "load_10_flex_8h_batt"] = np.asarray(s10_8["load"], dtype=float)
-            out.loc[idx, "load_25_flex_4h_batt"] = np.asarray(s25_4["load"], dtype=float)
-            out.loc[idx, "load_25_flex_8h_batt"] = np.asarray(s25_8["load"], dtype=float)
+                horizon_load = out.loc[horizon_idx, scenario.flex_col].to_numpy(dtype=float)
+                controller_method = "two_day_peak_cap_lp"
+                used_fallback = False
+                terminal_slack = 0.0
+                historical_peak_before_dispatch = float(historical_peak)
+                try:
+                    dispatch = solve_peak_cap_dispatch_lp(
+                        load=horizon_load,
+                        battery_power=battery_power,
+                        battery_energy=battery_energy,
+                        initial_soc=current_soc,
+                        terminal_soc_target=current_soc,
+                        historical_peak=historical_peak,
+                        step_h=step_h,
+                    )
+                    terminal_slack = float(dispatch.get("terminal_slack", 0.0))
+                except RuntimeError:
+                    target_guess = max(float(historical_peak_before_dispatch), float(np.max(horizon_load)))
+                    dispatch = simulate_peak_cap_dispatch(
+                        load=horizon_load,
+                        target_power=target_guess,
+                        battery_power=battery_power,
+                        battery_energy=battery_energy,
+                        initial_soc=current_soc,
+                        terminal_soc_target=current_soc,
+                        step_h=step_h,
+                    )
+                    controller_method = "two_day_peak_cap_fallback"
+                    used_fallback = True
 
-            out.loc[idx, "soc_10_flex_4h_batt"] = np.asarray(s10_4["soc"], dtype=float)
-            out.loc[idx, "soc_10_flex_8h_batt"] = np.asarray(s10_8["soc"], dtype=float)
-            out.loc[idx, "soc_25_flex_4h_batt"] = np.asarray(s25_4["soc"], dtype=float)
-            out.loc[idx, "soc_25_flex_8h_batt"] = np.asarray(s25_8["soc"], dtype=float)
+                n_exec = len(exec_idx)
+                exec_load = np.asarray(dispatch["grid_load"], dtype=float)[:n_exec]
+                exec_soc = np.asarray(dispatch["soc"], dtype=float)[:n_exec]
+                exec_charge = np.asarray(dispatch["charge_power"], dtype=float)[:n_exec]
+                exec_discharge = np.asarray(dispatch["discharge_power"], dtype=float)[:n_exec]
+                exec_net_power = np.asarray(dispatch["net_battery_power"], dtype=float)[:n_exec]
 
-            scenario_rows = [
-                ("10%_flex + 4h-Battery", "4h", battery_energy_4h, s10_4),
-                ("10%_flex + 8h-Battery", "8h", battery_energy_8h, s10_8),
-                ("25%_flex + 4h-Battery", "4h", battery_energy_4h, s25_4),
-                ("25%_flex + 8h-Battery", "8h", battery_energy_8h, s25_8),
-            ]
+                out.loc[exec_idx, scenario.load_col] = exec_load
+                out.loc[exec_idx, scenario.soc_col] = exec_soc
+                out.loc[exec_idx, scenario.charge_col] = exec_charge
+                out.loc[exec_idx, scenario.discharge_col] = exec_discharge
+                out.loc[exec_idx, scenario.net_power_col] = exec_net_power
 
-            for scenario, duration, energy, res in scenario_rows:
+                total_charge = float(exec_charge.sum() * step_h)
+                total_discharge = float(exec_discharge.sum() * step_h)
+                peak_pre_bess = float(out.loc[exec_idx, scenario.flex_col].max())
+                peak_post_bess = float(exec_load.max()) if exec_load.size else peak_pre_bess
+                final_soc = float(exec_soc[-1]) if exec_soc.size else float(current_soc)
+                historical_peak = max(historical_peak, peak_post_bess)
+
                 battery_rows.append(
                     {
                         "year": int(year),
-                        "date": day,
-                        "scenario": scenario,
-                        "battery_duration": duration,
+                        "date": date,
+                        "scenario": scenario.scenario,
+                        "battery_duration": scenario.battery_duration,
+                        "controller_method": controller_method,
+                        "used_fallback": bool(used_fallback),
+                        "dispatch_horizon_days": int(len(horizon_dates)),
+                        "dispatch_horizon_hours": float(len(horizon_load) * step_h),
                         "battery_power": battery_power,
-                        "battery_energy": energy,
-                        "total_charge": float(res["total_charge"]),
-                        "total_discharge": float(res["total_discharge"]),
-                        "cycles": float(res["cycles"]),
-                        "max_soc": float(res["max_soc"]),
-                        "mean_soc": float(res["mean_soc"]),
-                        "discharge_threshold": float(res["discharge_threshold"]),
-                        "charge_threshold": float(res["charge_threshold"]),
-                        "dynamic_peak_region": ",".join(str(int(v)) for v in list(res["dynamic_peak_region"])),
-                        "dynamic_valley_region": ",".join(str(int(v)) for v in list(res["dynamic_valley_region"])),
-                        "response_factor": float(res["response_factor"]),
+                        "battery_energy": battery_energy,
+                        "historical_peak_before_dispatch": historical_peak_before_dispatch,
+                        "initial_soc": float(current_soc),
+                        "terminal_soc_target": float(current_soc),
+                        "final_soc": final_soc,
+                        "min_soc": float(exec_soc.min()) if exec_soc.size else float(current_soc),
+                        "max_soc": float(exec_soc.max()) if exec_soc.size else float(current_soc),
+                        "target_grid_power": float(dispatch["target_power"]),
+                        "terminal_soc_slack": terminal_slack,
+                        "total_charge": total_charge,
+                        "total_discharge": total_discharge,
+                        "cycles": float((total_charge + total_discharge) / (2.0 * battery_energy)) if battery_energy > 0 else 0.0,
+                        "charge_steps": int(np.sum(exec_charge > 1e-10)),
+                        "discharge_steps": int(np.sum(exec_discharge > 1e-10)),
+                        "peak_pre_bess": peak_pre_bess,
+                        "peak_post_bess": peak_post_bess,
+                        "peak_reduction_vs_flex_percent": (
+                            (peak_pre_bess - peak_post_bess) / peak_pre_bess * 100.0 if peak_pre_bess > 0 else 0.0
+                        ),
                     }
                 )
+
+                current_soc = final_soc
 
     return out, pd.DataFrame(battery_rows)

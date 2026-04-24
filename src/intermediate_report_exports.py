@@ -186,7 +186,7 @@ def run_core_analysis(df: pd.DataFrame, dt_hours: float) -> CoreAnalysisResults:
     ts = prepare_features(df)
     ts = add_baselines(ts)
     ts, flex_daily_stats = add_flex(ts, dt_hours=dt_hours)
-    ts, battery_daily_stats = simulate_bess(ts)
+    ts, battery_daily_stats = simulate_bess(ts, step_h=dt_hours)
     characteristic_days = find_characteristic_days(ts)
 
     return CoreAnalysisResults(
@@ -367,6 +367,7 @@ def main() -> None:
         rq3_output_dir = get_rq_output_dir(context.output_dir, "rq3")
         fig10, fig25, table = run_rq3(
             day_df=context.day_df,
+            year_df=context.year_df,
             battery_daily_stats=context.battery_daily_stats,
             year=context.year,
             output_dir=rq3_output_dir,
