@@ -55,6 +55,12 @@ def add_common_report_args(parser: argparse.ArgumentParser) -> argparse.Argument
     parser.add_argument("--input", type=str, default="data/raw/ukpn-data-centre-demand-profiles.csv.gz")
     parser.add_argument("--output-dir", type=str, default=".")
     parser.add_argument("--year", type=int, default=2025)
+    parser.add_argument(
+        "--characteristic-day",
+        type=str,
+        default="",
+        help="Optional override for the characteristic day, formatted as YYYY-MM-DD.",
+    )
     parser.add_argument("--dt-hours", type=float, default=0.5)
     parser.add_argument("--dc-type", type=str, default="")
     parser.add_argument("--voltage-level", type=str, default="High Voltage Import")
@@ -70,8 +76,14 @@ def add_common_report_args(parser: argparse.ArgumentParser) -> argparse.Argument
 
 
 def detect_delimiter(csv_path: Path) -> str:
-    open_fn = gzip.open if csv_path.suffix == ".gz" else csv_path.open
-    with open_fn(csv_path, "rt", encoding="utf-8-sig", newline="") as f:
+    if csv_path.suffix == ".gz":
+        open_fn = gzip.open
+        open_args = (csv_path,)
+    else:
+        open_fn = csv_path.open
+        open_args = ()
+
+    with open_fn(*open_args, mode="rt", encoding="utf-8-sig", newline="") as f:
         first_line = f.readline()
     return ";" if first_line.count(";") > first_line.count(",") else ","
 
@@ -284,7 +296,14 @@ def build_context(args: argparse.Namespace, include_rq1_data: bool) -> ReportCon
         available = sorted(results.characteristic_days.keys())
         raise ValueError(f"Requested year {args.year} not available. Available years: {available}")
 
-    characteristic_day = results.characteristic_days[args.year]
+    if args.characteristic_day:
+        characteristic_day = pd.Timestamp(args.characteristic_day).floor("D")
+        if characteristic_day.year != args.year:
+            raise ValueError(
+                f"--characteristic-day year ({characteristic_day.year}) must match --year ({args.year})."
+            )
+    else:
+        characteristic_day = results.characteristic_days[args.year]
 
     day_df = results.timeseries[
         (results.timeseries["year"] == args.year) & (results.timeseries["date"] == characteristic_day)
