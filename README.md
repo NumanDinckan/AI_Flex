@@ -69,3 +69,4 @@ RQ3 applies BESS dispatch to the flex-adjusted full-year series and plots an ann
 - `docs/RQ2_METHOD_NOTES.md`
 - `docs/RQ3_METHOD_NOTES.md`
 - `docs/FINAL_REPORT_ALIGNMENT_NOTES.md`
+- `docs/PAPER_METHOD_COMPARISON.md`
