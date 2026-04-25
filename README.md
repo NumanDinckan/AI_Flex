@@ -1,47 +1,65 @@
 # AI Flex Project
 
-## Structure
-- `src/` Python analysis code
-- `docs/` project notes and report handoff documents
-- `outputs/rq1/` default RQ1 figures and CSVs
-- `outputs/rq2/` default RQ2 figures and CSVs
-- `outputs/rq3/` default RQ3 figures and CSVs
-- `data/raw/ukpn-data-centre-demand-profiles.csv` local UKPN demand input
+This repository contains the final analysis pipeline and report-ready outputs for the AI data-centre flexibility project.
+
+The project answers three research questions:
+
+- RQ1: What do publicly available data-centre load profiles reveal about variability, peak concentration, and potential flexibility?
+- RQ2: How does operational load shifting affect the annual load profile under fixed flexibility definitions?
+- RQ3: How much additional peak reduction can a co-located BESS provide after flexibility?
+
+## Repository Structure
+
+- `src/`: Python analysis code.
+- `rq1/`: committed report outputs for RQ1.
+- `rq2/`: committed report outputs for RQ2.
+- `rq3/`: committed report outputs for RQ3.
+- `docs/`: final-report notes, graph guides, method explanations, and caveats.
+- `data/raw/United Kingdom.csv`: optional UK electricity price input if present locally.
+- `data/raw/ukpn-data-centre-demand-profiles.csv`: local demand input, not committed because it is too large for GitHub.
+
+By default, the runner writes to `outputs/`. The report-ready committed files in this repository were generated with `--output-dir .`, so they appear under `rq1/`, `rq2/`, and `rq3/`.
 
 ## Run
-Activate environment:
+
+Activate the virtual environment:
 
 ```bash
 source .venv/bin/activate
 ```
 
-Run all RQs:
+Regenerate the committed report outputs:
 
 ```bash
-python src/intermediate_report_exports.py --rq all --year 2025
+python src/intermediate_report_exports.py --rq all --year 2025 --output-dir .
 ```
 
-Run one RQ:
+Run one research question:
 
 ```bash
-python src/intermediate_report_exports.py --rq rq1 --year 2025
-python src/intermediate_report_exports.py --rq rq2 --year 2025
-python src/intermediate_report_exports.py --rq rq3 --year 2025
+python src/intermediate_report_exports.py --rq rq1 --year 2025 --output-dir .
+python src/intermediate_report_exports.py --rq rq2 --year 2025 --output-dir .
+python src/intermediate_report_exports.py --rq rq3 --year 2025 --output-dir .
 ```
 
-Default outputs are written under `outputs/rq1`, `outputs/rq2`, and `outputs/rq3`. Pass `--output-dir <base-dir>` to choose another base directory.
+To write into the default `outputs/` folder instead, omit `--output-dir .`.
 
 ## Input Data
+
 Default demand input:
 
 `data/raw/ukpn-data-centre-demand-profiles.csv`
 
-If your dataset is elsewhere, pass `--input <path>`.
-
-Optional UK price input can be supplied for price-aware BESS dispatch:
+If the dataset is elsewhere, pass:
 
 ```bash
-python src/intermediate_report_exports.py --rq rq3 --year 2025 \
+python src/intermediate_report_exports.py --rq all --year 2025 --output-dir . --input "<path-to-demand-csv>"
+```
+
+Optional UK electricity price input:
+
+```bash
+python src/intermediate_report_exports.py --rq rq3 --year 2025 --output-dir . \
   --price-input "data/raw/United Kingdom.csv" \
   --price-timestamp-col "Datetime (UTC)" \
   --price-col "Price (EUR/MWhe)"
@@ -49,27 +67,58 @@ python src/intermediate_report_exports.py --rq rq3 --year 2025 \
 
 If `data/raw/United Kingdom.csv` exists, it is used automatically. Without a price file, RQ3 remains peak-first and reports `price_signal_used = False`.
 
-## Current Method
-RQ1 uses the full-year centre-level profiles to answer variability, peak concentration, and potential flexibility. Figure 0 now combines the accepted one-hour load-jump view with an annual load-duration curve, peak-timing histogram, and peak-shaving opportunity curve.
+## Current Method Summary
 
-RQ2 reports full-year annual mean-day profiles, not single peak days. Flexibility is defined operationally:
+RQ1 uses the full-year centre-level profiles to answer variability, peak concentration, and potential flexibility. Figure 0 combines the accepted one-hour load-jump view with an annual load-duration curve, peak-timing histogram, and peak-shaving opportunity curve.
 
-- `10%` flex: up to `10%` reduction for a maximum of `3` consecutive peak hours
-- `25%` flex: up to `25%` reduction for a maximum of `3` consecutive peak hours
-- shifted work is recovered in a fixed off-peak recipient window, `22:00-02:00`
+RQ2 uses the full-year half-hour load profile and reports annual mean-day and annual mean 48-hour views. Flexibility is defined operationally:
 
-RQ2 exports the main annual mean-day figure plus companion Figure 1 views for annual shift components and an annual mean 48-hour shift window. When the UK price CSV is present, Figure 1 overlays the mean electricity price on a right-hand axis.
+- `10%` flex: up to `10%` reduction for a maximum of `3` consecutive peak hours.
+- `25%` flex: up to `25%` reduction for a maximum of `3` consecutive peak hours.
+- shifted load is recovered in the fixed off-peak recipient window `22:00-02:00`.
 
-RQ3 applies BESS dispatch to the flex-adjusted full-year series and plots an annual mean 48-hour horizon, not exact calendar days. When the UK price CSV is present, Figure 2 overlays the mean electricity price on a right-hand axis. It reports:
+RQ3 applies BESS dispatch to the RQ2 flex-adjusted full-year series. The battery dispatch is peak-first and, when UK price data is present, price-aware as a secondary objective. Figure 2 shows annual mean 48-hour profiles for the `10%` and `25%` flexibility cases with `4h` and `8h` BESS durations.
 
-- original peak
-- residual peak after flexibility
-- residual peak after flexibility and BESS
+## Report-Ready Outputs
 
-## Docs
-- `docs/RQ1_HANDOFF_NOTES.md`
-- `docs/RQ1_GRAPH_GUIDE.md`
-- `docs/RQ2_METHOD_NOTES.md`
-- `docs/RQ3_METHOD_NOTES.md`
-- `docs/FINAL_REPORT_ALIGNMENT_NOTES.md`
-- `docs/PAPER_METHOD_COMPARISON.md`
+RQ1:
+
+- `rq1/figure0_intro_annual_mean_day_all_centres.png`
+- `rq1/figure0_intro_annual_mean_day_all_centres_left.png`
+- `rq1/figure0_1_rq1_center_load_jumps_2025.png`
+- `rq1/rq1_profile_answer_summary_2025.csv`
+- `rq1/rq1_peak_shaving_opportunity_2025.csv`
+- `rq1/rq1_center_variability_metrics_2025.csv`
+- `rq1/rq1_center_variability_bucket_summary_2025.csv`
+
+RQ2:
+
+- `rq2/figure1_flex_intermediate.png`
+- `rq2/figure1_flex_intermediate_annual_shift_components.png`
+- `rq2/figure1_flex_intermediate_annual_48h_shift_window.png`
+- `rq2/flexibility_summary_intermediate.csv`
+
+RQ3:
+
+- `rq3/figure2_flex_bess_10_intermediate.png`
+- `rq3/figure2_flex_bess_25_intermediate.png`
+- `rq3/bess_summary_intermediate.csv`
+
+## Documentation
+
+- `docs/FINAL_REPORT_ALIGNMENT_NOTES.md`: final report and presentation storyline.
+- `docs/RQ1_GRAPH_GUIDE.md`: detailed Figure 0 and RQ1 graph explanation.
+- `docs/RQ1_HANDOFF_NOTES.md`: compact RQ1 handoff.
+- `docs/RQ2_METHOD_NOTES.md`: RQ2 flexibility method and Figure 1 interpretation.
+- `docs/RQ3_METHOD_NOTES.md`: RQ3 BESS method and Figure 2 interpretation.
+- `docs/PAPER_METHOD_COMPARISON.md`: comparison with the flexible data-centres whitepaper.
+- `docs/REPO_UPLOAD_CHECKLIST.md`: submission and repository hygiene checklist.
+- `docs/GITHUB_PARALLEL_WORKFLOW.md`: collaboration and run workflow.
+
+## Key Caveats
+
+- The demand data is expressed as utilisation ratios, not MW.
+- RQ1 identifies observed variability and peak concentration; it does not prove contractual or technical flexibility.
+- RQ2 is a transparent load-shifting scenario, not a full workload scheduler.
+- RQ3 is a peak-first BESS dispatch, not a full tariff, degradation, or investment optimization.
+- The UK price signal is used for plotting and secondary BESS dispatch logic; it does not turn the model into a full electricity-bill optimization.

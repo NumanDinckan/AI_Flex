@@ -10,6 +10,8 @@ This guide explains how the RQ1 figures should be read and how they can be used 
 - peak concentration
 - potential flexibility
 
+In the final report, RQ1 is the evidence step before the scenario analysis. It shows where flexibility may be valuable; RQ2 defines the actual flexibility rule, and RQ3 tests BESS on top of that rule.
+
 ## Main Message
 
 The public data suggests that average data-centre load is relatively stable, but the profile still contains meaningful short-run movement and a concentrated upper tail. The annual peak is about `1.79x` the mean, and the top `10%` of half-hour intervals account for about `50.3%` of all above-mean load. This means flexibility potential is not spread evenly across the whole year: it is concentrated in identifiable high-load intervals.

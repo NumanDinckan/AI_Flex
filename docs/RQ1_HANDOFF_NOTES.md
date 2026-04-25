@@ -6,6 +6,8 @@ What do publicly available data centre load profiles reveal about variability, p
 
 For a more detailed graph-by-graph explanation, use `docs/RQ1_GRAPH_GUIDE.md`.
 
+For final report writing, RQ1 should be used as the empirical motivation for the later flexibility and BESS scenarios. It identifies observed variability and peak concentration; it does not apply the RQ2 flexibility rule.
+
 RQ1 should now be answered with three linked ideas:
 
 - Variability: how much the profiles move within short time windows.
