@@ -16,7 +16,7 @@ def apply_granular_x_axis(ax: plt.Axes) -> None:
     ax.grid(True, which="minor", alpha=0.12)
 
 
-def _build_profiles(centres_year_df: pd.DataFrame, characteristic_day: pd.Timestamp) -> tuple[pd.Series, pd.Series, pd.Series, pd.Series, pd.Series]:
+def _build_profiles(centres_year_df: pd.DataFrame) -> tuple[pd.Series, pd.Series, pd.Series, pd.Series, pd.Series]:
     df = centres_year_df.copy()
     df["date"] = df["timestamp"].dt.floor("D")
     df["weekday"] = df["timestamp"].dt.weekday
@@ -28,15 +28,15 @@ def _build_profiles(centres_year_df: pd.DataFrame, characteristic_day: pd.Timest
         .reset_index()
     )
 
-    char_profile = (
-        day_profile[day_profile["date"] == pd.Timestamp(characteristic_day)]
-        .set_index("halfhour_index")["utilisation"]
+    annual_mean = (
+        day_profile.groupby("halfhour_index", observed=True)["utilisation"]
+        .mean()
         .reindex(range(48))
         .interpolate(limit_direction="both")
     )
 
-    if char_profile.isna().all():
-        raise ValueError("Characteristic-day profile is empty after centre aggregation.")
+    if annual_mean.isna().all():
+        raise ValueError("Annual mean-day profile is empty after centre aggregation.")
 
     day_profile = day_profile.merge(
         df[["date", "weekday"]].drop_duplicates(),
@@ -73,14 +73,11 @@ def _build_profiles(centres_year_df: pd.DataFrame, characteristic_day: pd.Timest
         .interpolate(limit_direction="both")
     )
 
-    return char_profile, weekday_mean, weekend_mean, weekday_p10, weekday_p90
+    return annual_mean, weekday_mean, weekend_mean, weekday_p10, weekday_p90
 
 
 def _center_variability_metrics(centres_year_df: pd.DataFrame) -> pd.DataFrame:
-    df = centres_year_df.sort_values(["centre", "timestamp"]).copy()
-
-    # One-hour delta on half-hour data -> difference against t-2.
-    df["delta_1h"] = df.groupby("centre", observed=True)["utilisation"].diff(2)
+    df = _add_timestamp_exact_1h_delta(centres_year_df)
     df["abs_delta_1h"] = df["delta_1h"].abs()
 
     rows: list[dict[str, float | int | str]] = []
@@ -147,10 +144,7 @@ def _hourly_center_distribution(centres_year_df: pd.DataFrame) -> pd.DataFrame:
 
 
 def _center_hourly_delta_frame(centres_year_df: pd.DataFrame) -> pd.DataFrame:
-    df = centres_year_df.sort_values(["centre", "timestamp"]).copy()
-
-    # One-hour delta on half-hour data => t minus t-2.
-    df["delta_1h"] = df.groupby("centre", observed=True)["utilisation"].diff(2)
+    df = _add_timestamp_exact_1h_delta(centres_year_df)
     df = df.dropna(subset=["delta_1h"]).copy()
     df["abs_delta_1h"] = df["delta_1h"].abs()
     df["hour"] = (df["halfhour_index"] // 2).astype(int)
@@ -158,17 +152,23 @@ def _center_hourly_delta_frame(centres_year_df: pd.DataFrame) -> pd.DataFrame:
     return df[["centre", "timestamp", "hour", "delta_1h", "abs_delta_1h"]]
 
 
+def _add_timestamp_exact_1h_delta(centres_year_df: pd.DataFrame) -> pd.DataFrame:
+    df = centres_year_df.sort_values(["centre", "timestamp"]).copy()
+    previous = df[["centre", "timestamp", "utilisation"]].copy()
+    previous["timestamp"] = previous["timestamp"] + pd.Timedelta(hours=1)
+    previous = previous.rename(columns={"utilisation": "utilisation_1h_prior"})
+    df = df.merge(previous, on=["centre", "timestamp"], how="left")
+    df["delta_1h"] = df["utilisation"] - df["utilisation_1h_prior"]
+    return df
+
+
 def plot_rq1_year_overview(
     centres_year_df: pd.DataFrame,
-    characteristic_day: pd.Timestamp,
     metrics_df: pd.DataFrame,
     year: int,
     out_file: Path,
 ) -> None:
-    char_profile, weekday_mean, weekend_mean, weekday_p10, weekday_p90 = _build_profiles(
-        centres_year_df,
-        characteristic_day=characteristic_day,
-    )
+    annual_mean, weekday_mean, weekend_mean, weekday_p10, weekday_p90 = _build_profiles(centres_year_df)
 
     center_hour = _hourly_center_distribution(centres_year_df)
     deltas = _center_hourly_delta_frame(centres_year_df)
@@ -185,11 +185,11 @@ def plot_rq1_year_overview(
         alpha=0.22,
         label="Weekday p10-p90 (all 2025 weekdays)",
     )
-    ax1.plot(x, weekday_mean.to_numpy(dtype=float), color="#1f77b4", linewidth=2.4, label="Typical weekday mean")
-    ax1.plot(x, weekend_mean.to_numpy(dtype=float), color="#ff7f0e", linewidth=2.2, label="Typical weekend mean")
-    ax1.plot(x, char_profile.to_numpy(dtype=float), color="#2f2f2f", linewidth=2.2, linestyle="--", label="Characteristic peak day")
+    ax1.plot(x, annual_mean.to_numpy(dtype=float), color="#2f2f2f", linewidth=2.4, label="Annual mean day")
+    ax1.plot(x, weekday_mean.to_numpy(dtype=float), color="#1f77b4", linewidth=2.1, label="Weekday mean")
+    ax1.plot(x, weekend_mean.to_numpy(dtype=float), color="#ff7f0e", linewidth=2.0, label="Weekend mean")
 
-    ax1.set_title(f"RQ1 ({year}): Characteristic Day vs Typical Weekday/Weekend", fontsize=13, pad=12)
+    ax1.set_title(f"RQ1 ({year}): Annual Mean-Day Load Shape", fontsize=13, pad=12)
     ax1.set_ylabel("utilisation")
     ax1.set_xlabel("time of day (HH:MM)")
     apply_granular_x_axis(ax1)
@@ -255,14 +255,10 @@ def plot_rq1_year_overview(
 
 def plot_rq1_year_overview_left_panels(
     centres_year_df: pd.DataFrame,
-    characteristic_day: pd.Timestamp,
     year: int,
     out_file: Path,
 ) -> None:
-    char_profile, weekday_mean, weekend_mean, weekday_p10, weekday_p90 = _build_profiles(
-        centres_year_df,
-        characteristic_day=characteristic_day,
-    )
+    annual_mean, weekday_mean, weekend_mean, weekday_p10, weekday_p90 = _build_profiles(centres_year_df)
     deltas = _center_hourly_delta_frame(centres_year_df)
 
     fig, (ax1, ax2) = plt.subplots(2, 1, figsize=(12, 10), gridspec_kw={"height_ratios": [1.15, 1.0]})
@@ -276,10 +272,10 @@ def plot_rq1_year_overview_left_panels(
         alpha=0.22,
         label="Weekday p10-p90 (all 2025 weekdays)",
     )
-    ax1.plot(x, weekday_mean.to_numpy(dtype=float), color="#1f77b4", linewidth=2.4, label="Typical weekday mean")
-    ax1.plot(x, weekend_mean.to_numpy(dtype=float), color="#ff7f0e", linewidth=2.2, label="Typical weekend mean")
-    ax1.plot(x, char_profile.to_numpy(dtype=float), color="#2f2f2f", linewidth=2.2, linestyle="--", label="Characteristic peak day")
-    ax1.set_title(f"RQ1 ({year}): Characteristic Day vs Typical Weekday/Weekend", fontsize=13, pad=12)
+    ax1.plot(x, annual_mean.to_numpy(dtype=float), color="#2f2f2f", linewidth=2.4, label="Annual mean day")
+    ax1.plot(x, weekday_mean.to_numpy(dtype=float), color="#1f77b4", linewidth=2.1, label="Weekday mean")
+    ax1.plot(x, weekend_mean.to_numpy(dtype=float), color="#ff7f0e", linewidth=2.0, label="Weekend mean")
+    ax1.set_title(f"RQ1 ({year}): Annual Mean-Day Load Shape", fontsize=13, pad=12)
     ax1.set_ylabel("utilisation")
     ax1.set_xlabel("time of day (HH:MM)")
     apply_granular_x_axis(ax1)
@@ -378,13 +374,12 @@ def plot_rq1_center_load_jump_detail(
 def run_rq1(
     centres_year_df: pd.DataFrame,
     year: int,
-    characteristic_day: pd.Timestamp,
     output_dir: Path,
 ) -> list[Path]:
     output_dir.mkdir(parents=True, exist_ok=True)
 
-    figure_file = output_dir / "figure0_intro_typical_day_all_centres.png"
-    figure_file_left = output_dir / "figure0_intro_typical_day_all_centres_left.png"
+    figure_file = output_dir / "figure0_intro_annual_mean_day_all_centres.png"
+    figure_file_left = output_dir / "figure0_intro_annual_mean_day_all_centres_left.png"
     figure_file_center_jumps = output_dir / f"figure0_1_rq1_center_load_jumps_{year}.png"
     metrics_file = output_dir / f"rq1_center_variability_metrics_{year}.csv"
     bucket_file = output_dir / f"rq1_center_variability_bucket_summary_{year}.csv"
@@ -394,14 +389,12 @@ def run_rq1(
 
     plot_rq1_year_overview(
         centres_year_df=centres_year_df,
-        characteristic_day=characteristic_day,
         metrics_df=metrics,
         year=year,
         out_file=figure_file,
     )
     plot_rq1_year_overview_left_panels(
         centres_year_df=centres_year_df,
-        characteristic_day=characteristic_day,
         year=year,
         out_file=figure_file_left,
     )

@@ -38,7 +38,7 @@ def apply_granular_x_axis(ax: plt.Axes) -> None:
     ax.grid(True, which="minor", alpha=0.12)
 
 
-def apply_two_day_x_axis(ax: plt.Axes, timestamps: pd.Series) -> None:
+def apply_timestamp_x_axis(ax: plt.Axes, timestamps: pd.Series) -> None:
     x = np.arange(len(timestamps))
     tick_idx = np.arange(0, len(timestamps), 4)
     labels = pd.to_datetime(timestamps.iloc[tick_idx]).dt.strftime("%m-%d %H:%M")
@@ -50,11 +50,69 @@ def apply_two_day_x_axis(ax: plt.Axes, timestamps: pd.Series) -> None:
     ax.grid(True, which="minor", alpha=0.10)
 
 
+def apply_horizon_hour_axis(ax: plt.Axes, horizon_hours: pd.Series | np.ndarray) -> None:
+    hours = np.asarray(horizon_hours, dtype=float)
+    if hours.size == 0:
+        return
+    max_hour = float(hours.max())
+    major_step = 4 if max_hour <= 24 else 6
+    display_max = float(np.ceil(max_hour / major_step) * major_step)
+    if max_hour > 24 and display_max < 48:
+        display_max = 48.0
+    major_ticks = np.arange(0, display_max + 0.01, major_step)
+    ax.set_xlim(float(hours.min()), display_max)
+    ax.set_xticks(major_ticks)
+    ax.set_xticklabels([f"{int(h):02d}:00" for h in major_ticks])
+    ax.set_xticks(np.arange(0, display_max + 0.01, 1), minor=True)
+    ax.grid(True, which="major", alpha=0.28)
+    ax.grid(True, which="minor", alpha=0.10)
+
+
 def apply_delta_ylim(ax: plt.Axes, *series: pd.Series) -> None:
     vals = np.concatenate([np.asarray(s, dtype=float) for s in series])
     abs_max = float(np.max(np.abs(vals))) if vals.size else 0.0
     lim = max(0.002, abs_max * 1.2)
     ax.set_ylim(-lim, lim)
+
+
+def add_price_axis(
+    ax: plt.Axes,
+    x: np.ndarray,
+    df: pd.DataFrame,
+    label: str = "UK electricity price",
+) -> plt.Axes | None:
+    if "uk_price" not in df.columns:
+        return None
+    price = pd.to_numeric(df["uk_price"], errors="coerce")
+    if price.notna().sum() == 0:
+        return None
+
+    price_ax = ax.twinx()
+    price_ax.plot(
+        x,
+        price.to_numpy(dtype=float),
+        label=label,
+        linewidth=1.7,
+        linestyle=":",
+        color="#6f42c1",
+        alpha=0.88,
+        zorder=0,
+    )
+    price_ax.set_ylabel("price (EUR/MWh)", color="#6f42c1")
+    price_ax.tick_params(axis="y", colors="#6f42c1")
+    price_ax.grid(False)
+    return price_ax
+
+
+def merge_legends(ax: plt.Axes, extra_axes: list[plt.Axes | None] | None = None, **legend_kwargs: object) -> None:
+    handles, labels = ax.get_legend_handles_labels()
+    for extra_ax in extra_axes or []:
+        if extra_ax is None:
+            continue
+        extra_handles, extra_labels = extra_ax.get_legend_handles_labels()
+        handles.extend(extra_handles)
+        labels.extend(extra_labels)
+    ax.legend(handles, labels, **legend_kwargs)
 
 
 def add_peak_valley_shading(
@@ -96,191 +154,60 @@ def add_peak_valley_shading(
     )
 
 
-def format_index_ranges(indices: list[int]) -> str:
-    if not indices:
-        return "-"
+def build_annual_mean_horizon(
+    year_df: pd.DataFrame,
+    dt_hours: float,
+    horizon_hours: float = 48.0,
+) -> pd.DataFrame:
+    steps = int(round(horizon_hours / dt_hours))
+    day_steps = int(round(24.0 / dt_hours))
+    numeric_cols = [
+        col
+        for col in year_df.columns
+        if pd.api.types.is_numeric_dtype(year_df[col])
+        and col not in {"year", "month", "weekday", "halfhour_index"}
+    ]
 
-    values = sorted(set(int(v) for v in indices))
-    ranges: list[str] = []
-    start = values[0]
-    prev = values[0]
-
-    for val in values[1:]:
-        if val == prev + 1:
-            prev = val
+    windows: list[pd.DataFrame] = []
+    for date in sorted(pd.to_datetime(year_df["date"].dropna().unique())):
+        start = pd.Timestamp(date)
+        end = start + pd.Timedelta(hours=horizon_hours)
+        window = year_df[(year_df["timestamp"] >= start) & (year_df["timestamp"] < end)].copy()
+        if window.empty:
             continue
-        ranges.append(f"{start}-{prev}" if start != prev else f"{start}")
-        start = val
-        prev = val
+        elapsed_hours = (window["timestamp"] - start).dt.total_seconds() / 3600.0
+        window["horizon_index"] = np.rint(elapsed_hours / dt_hours).astype(int)
+        window = window[(window["horizon_index"] >= 0) & (window["horizon_index"] < steps)]
+        if not window.empty:
+            windows.append(window[["horizon_index", *numeric_cols]])
 
-    ranges.append(f"{start}-{prev}" if start != prev else f"{start}")
-    return ",".join(ranges)
+    if not windows:
+        raise ValueError("No annual 48-hour windows could be built for RQ2.")
 
-
-def get_event_window_mask(timestamps: pd.Series) -> np.ndarray:
-    ts = pd.to_datetime(timestamps)
-    hour = ts.dt.hour + ts.dt.minute / 60.0
-    return ((ts.dt.weekday < 5) & (hour >= EVENT_START_HOUR) & (hour < EVENT_END_HOUR)).to_numpy(dtype=bool)
-
-
-def get_two_day_window(year_df: pd.DataFrame, characteristic_day: pd.Timestamp) -> pd.DataFrame:
-    start = pd.Timestamp(characteristic_day) - pd.Timedelta(days=1)
-    end = pd.Timestamp(characteristic_day) + pd.Timedelta(days=1) - pd.Timedelta(minutes=30)
-    out = year_df[(year_df["timestamp"] >= start) & (year_df["timestamp"] <= end)].copy()
-    return out.sort_values("timestamp").reset_index(drop=True)
-
-
-def build_transfer_pairs(window_df: pd.DataFrame, suffix: str) -> list[tuple[int, int, float]]:
-    down = window_df[f"shift_down_{suffix}"].to_numpy(dtype=float).copy()
-    up = window_df[f"shift_up_{suffix}"].to_numpy(dtype=float).copy()
-    transfers: list[tuple[int, int, float]] = []
-
-    down_idx = [int(i) for i in np.where(down > 1e-10)[0]]
-    up_idx = [int(i) for i in np.where(up > 1e-10)[0]]
-
-    for src in down_idx:
-        remaining = down[src]
-        if remaining <= 1e-10:
-            continue
-        ordered_up = sorted(up_idx, key=lambda dst: (abs(dst - src), dst))
-        for dst in ordered_up:
-            if remaining <= 1e-10:
-                break
-            if up[dst] <= 1e-10:
-                continue
-            amount = min(remaining, up[dst])
-            transfers.append((src, dst, float(amount)))
-            remaining -= amount
-            up[dst] -= amount
-
-    return transfers
-
-
-def draw_transfer_annotations(
-    ax: plt.Axes,
-    window_df: pd.DataFrame,
-    suffix: str,
-    color: str,
-) -> None:
-    transfers = build_transfer_pairs(window_df, suffix)
-    if not transfers:
-        return
-
-    ymax = ax.get_ylim()[1]
-    for idx, (src, dst, amount) in enumerate(transfers, start=1):
-        src_y = float(window_df["utilisation"].iloc[src])
-        dst_y = float(window_df["utilisation"].iloc[dst])
-        lift = 0.012 + 0.004 * (idx % 3)
-        ax.annotate(
-            "",
-            xy=(dst, dst_y + lift),
-            xytext=(src, src_y + lift),
-            arrowprops={
-                "arrowstyle": "->",
-                "color": color,
-                "lw": 1.0,
-                "alpha": 0.55,
-                "shrinkA": 0,
-                "shrinkB": 0,
-                "connectionstyle": "arc3,rad=0.12",
-            },
-            zorder=2,
-        )
-        label_y = min(max(src_y, dst_y) + lift + 0.0015, ymax - 0.002)
-        label_x = src + 0.5 * (dst - src)
-        ax.text(
-            label_x,
-            label_y,
-            str(idx),
-            color=color,
-            fontsize=7.5,
-            ha="center",
-            va="bottom",
-            bbox={"boxstyle": "round,pad=0.16", "facecolor": "white", "edgecolor": color, "alpha": 0.78},
-            zorder=5,
-        )
-
-
-def build_aggregated_transfers(window_df: pd.DataFrame, suffix: str) -> list[tuple[int, float, float]]:
-    transfers = build_transfer_pairs(window_df, suffix)
-    if not transfers:
-        return []
-
-    grouped: dict[int, list[tuple[int, float]]] = {}
-    for src, dst, amount in transfers:
-        grouped.setdefault(src, []).append((dst, amount))
-
-    aggregated: list[tuple[int, float, float]] = []
-    for src in sorted(grouped):
-        total_amount = float(sum(amount for _, amount in grouped[src]))
-        if total_amount <= 1e-10:
-            continue
-        weighted_dst = float(sum(dst * amount for dst, amount in grouped[src]) / total_amount)
-        aggregated.append((src, weighted_dst, total_amount))
-
-    return aggregated
-
-
-def draw_aggregated_transfer_annotations(
-    ax: plt.Axes,
-    window_df: pd.DataFrame,
-    suffix: str,
-    color: str,
-) -> None:
-    transfers = build_aggregated_transfers(window_df, suffix)
-    if not transfers:
-        return
-
-    ymax = ax.get_ylim()[1]
-    timestamps = pd.to_datetime(window_df["timestamp"]).reset_index(drop=True)
-
-    for idx, (src, dst_mean, amount) in enumerate(transfers, start=1):
-        src_y = float(window_df["utilisation"].iloc[src])
-        dst_y = float(np.interp(dst_mean, np.arange(len(window_df)), window_df["utilisation"].to_numpy(dtype=float)))
-        lift = 0.014 + 0.006 * ((idx - 1) % 2)
-        ax.annotate(
-            "",
-            xy=(dst_mean, dst_y + lift),
-            xytext=(src, src_y + lift),
-            arrowprops={
-                "arrowstyle": "->",
-                "color": color,
-                "lw": 1.8,
-                "alpha": 0.78,
-                "shrinkA": 0,
-                "shrinkB": 0,
-                "connectionstyle": "arc3,rad=0.08",
-            },
-            zorder=4,
-        )
-        src_label = timestamps.iloc[src].strftime("%H:%M")
-        dst_idx = int(round(dst_mean))
-        dst_idx = max(0, min(dst_idx, len(timestamps) - 1))
-        dst_label = timestamps.iloc[dst_idx].strftime("%H:%M")
-        label_x = src + 0.5 * (dst_mean - src)
-        label_y = min(max(src_y, dst_y) + lift + 0.002, ymax - 0.002)
-        ax.text(
-            label_x,
-            label_y,
-            f"{idx}: {src_label} -> {dst_label}",
-            color=color,
-            fontsize=8,
-            ha="center",
-            va="bottom",
-            bbox={"boxstyle": "round,pad=0.18", "facecolor": "white", "edgecolor": color, "alpha": 0.86},
-            zorder=5,
-        )
+    profile = (
+        pd.concat(windows, ignore_index=True)
+        .groupby("horizon_index", observed=True)[numeric_cols]
+        .mean()
+        .reindex(range(steps))
+        .interpolate(limit_direction="both")
+        .reset_index()
+    )
+    profile["horizon_hour"] = profile["horizon_index"] * dt_hours
+    profile["halfhour_index"] = profile["horizon_index"] % day_steps
+    profile["profile_basis"] = f"annual_mean_{int(horizon_hours)}h_shift_window"
+    return profile
 
 
 def plot_figure1(day_df: pd.DataFrame, year: int, out_file: Path) -> None:
     x = day_df["halfhour_index"].to_numpy(dtype=int)
+    reference_col = "mean_day_base" if "mean_day_base" in day_df.columns else "med_base"
 
     fig, ax = plt.subplots(figsize=(12, 6))
 
     ax.plot(
         x,
-        day_df["med_base"],
-        label="Typical Median Reference",
+        day_df[reference_col],
+        label="Annual Mean Baseline",
         linewidth=1.9,
         linestyle="--",
         color="#6c757d",
@@ -296,16 +223,16 @@ def plot_figure1(day_df: pd.DataFrame, year: int, out_file: Path) -> None:
         original=day_df["utilisation"],
         shifted=day_df["load_flex_25"],
         reduction_label="Event-window reduction",
-        up_label="Recovery outside event window",
+        up_label="Recovery in 22:00-02:00",
     )
 
     ax.plot(x, day_df["utilisation"], label="Baseline Load", linewidth=2.5, color="#173f5f", zorder=4)
 
-    ax.set_title(f"AI Data Center Flexibility: 10% Conservative vs 25% Aggressive ({year})", fontsize=13, pad=16)
+    ax.set_title(f"AI Data Center Flexibility: Annual Mean-Day Profile ({year})", fontsize=13, pad=16)
     ax.text(
         0.5,
         1.01,
-        "Characteristic day profile with weekday 14:00-22:00 event-window shifting",
+        "Full-year mean daily profile after shifting the highest 3 consecutive peak hours into the 22:00-02:00 off-peak window",
         transform=ax.transAxes,
         ha="center",
         va="bottom",
@@ -313,13 +240,14 @@ def plot_figure1(day_df: pd.DataFrame, year: int, out_file: Path) -> None:
         color="#444444",
     )
 
-    ax.set_xlabel("halfhour_index (0-47)")
+    ax.set_xlabel("time of day (HH:MM)")
     ax.set_ylabel("utilisation")
     apply_granular_x_axis(ax)
+    price_ax = add_price_axis(ax, x, day_df, label="UK electricity price (annual mean)")
     apply_zoomed_ylim(
         ax,
         day_df["utilisation"],
-        day_df["med_base"],
+        day_df[reference_col],
         day_df["load_flex_10"],
         day_df["load_flex_25"],
     )
@@ -327,15 +255,19 @@ def plot_figure1(day_df: pd.DataFrame, year: int, out_file: Path) -> None:
     handles, labels = ax.get_legend_handles_labels()
     order = [
         "Baseline Load",
-        "Typical Median Reference",
+        "Annual Mean Baseline",
         "10% Flex",
         "25% Flex",
         "Event-window reduction",
-        "Recovery outside event window",
+        "Recovery in 22:00-02:00",
     ]
     handle_map = dict(zip(labels, handles))
     ordered_labels = [label for label in order if label in handle_map]
     ordered_handles = [handle_map[label] for label in ordered_labels]
+    if price_ax is not None:
+        price_handles, price_labels = price_ax.get_legend_handles_labels()
+        ordered_handles.extend(price_handles)
+        ordered_labels.extend(price_labels)
     ax.legend(ordered_handles, ordered_labels, loc="best", frameon=False)
 
     fig.tight_layout()
@@ -343,146 +275,157 @@ def plot_figure1(day_df: pd.DataFrame, year: int, out_file: Path) -> None:
     plt.close(fig)
 
 
-def plot_two_day_diagnostic(year_df: pd.DataFrame, characteristic_day: pd.Timestamp, year: int, out_file: Path) -> None:
-    window_df = get_two_day_window(year_df, characteristic_day)
-    if window_df.empty:
-        return
-
-    x = np.arange(len(window_df))
-    event_mask = get_event_window_mask(window_df["timestamp"])
-
-    fig, axes = plt.subplots(2, 1, figsize=(14, 9), sharex=True)
-    scenario_defs = [
+def plot_annual_shift_components(day_df: pd.DataFrame, year: int, out_file: Path) -> None:
+    x = day_df["halfhour_index"].to_numpy(dtype=int)
+    scenarios = [
         ("10", "10% Flex", "#f28e2b"),
         ("25", "25% Flex", "#59a14f"),
     ]
 
-    for ax, (suffix, label, color) in zip(axes, scenario_defs):
-        scenario_col = f"load_flex_{suffix}"
-        shift_down_col = f"shift_down_{suffix}"
-        shift_up_col = f"shift_up_{suffix}"
+    fig, axes = plt.subplots(2, 2, figsize=(16, 9), sharex="col")
 
-        ax.plot(x, window_df["utilisation"], label="Baseline Load", linewidth=2.3, color="#173f5f", zorder=4)
-        ax.plot(x, window_df[scenario_col], label=label, linewidth=1.9, color=color, alpha=0.90, zorder=3)
+    for row, (suffix, label, color) in enumerate(scenarios):
+        load_ax = axes[row, 0]
+        shift_ax = axes[row, 1]
+        flex_col = f"load_flex_{suffix}"
+        down_col = f"shift_down_{suffix}"
+        up_col = f"shift_up_{suffix}"
 
-        ax.fill_between(
+        load_ax.plot(x, day_df["utilisation"], label="Annual mean baseline", linewidth=2.3, color="#173f5f")
+        load_ax.plot(x, day_df[flex_col], label=label, linewidth=2.0, color=color)
+        load_ax.fill_between(
             x,
-            window_df["utilisation"],
-            window_df[scenario_col],
-            where=((window_df[shift_down_col].to_numpy(dtype=float) > 1e-10) & event_mask),
-            color="#7cc576",
-            alpha=0.28,
-            label="Reduced in event window",
+            day_df["utilisation"],
+            day_df[flex_col],
+            where=day_df[down_col].to_numpy(dtype=float) > 1e-10,
+            color="#8fd19e",
+            alpha=0.25,
+            label="mean reduction",
         )
-        ax.fill_between(
+        load_ax.fill_between(
             x,
-            window_df["utilisation"],
-            window_df[scenario_col],
-            where=(window_df[shift_up_col].to_numpy(dtype=float) > 1e-10),
-            color="#d1495b",
-            alpha=0.18,
-            label="Recovered in other slots",
+            day_df["utilisation"],
+            day_df[flex_col],
+            where=day_df[up_col].to_numpy(dtype=float) > 1e-10,
+            color="#f4b7b2",
+            alpha=0.20,
+            label="mean recovery",
         )
+        load_ax.set_title(f"{label}: annual mean-day load response", fontsize=11, pad=10)
+        load_ax.set_ylabel("utilisation")
+        apply_zoomed_ylim(load_ax, day_df["utilisation"], day_df[flex_col])
+        apply_granular_x_axis(load_ax)
+        price_ax = add_price_axis(load_ax, x, day_df, label="UK price")
+        merge_legends(load_ax, [price_ax], loc="best", frameon=False, fontsize=8)
 
-        for idx in np.where(event_mask)[0]:
-            ax.axvspan(idx - 0.5, idx + 0.5, color="#999999", alpha=0.04, linewidth=0)
+        shift_ax.bar(x - 0.16, -day_df[down_col], width=0.32, color="#2ca25f", alpha=0.72, label="reduction")
+        shift_ax.bar(x + 0.16, day_df[up_col], width=0.32, color="#de6b6b", alpha=0.62, label="recovery")
+        shift_ax.axhline(0.0, color="#333333", linewidth=1.0)
+        shift_ax.set_title(f"{label}: mean shifted load by recipient/source hour", fontsize=11, pad=10)
+        shift_ax.set_ylabel("mean shifted\nutilisation")
+        apply_delta_ylim(shift_ax, day_df[down_col], day_df[up_col])
+        apply_granular_x_axis(shift_ax)
+        shift_ax.legend(loc="best", frameon=False, fontsize=8)
 
-        apply_zoomed_ylim(ax, window_df["utilisation"], window_df[scenario_col])
-        draw_transfer_annotations(ax, window_df, suffix, color)
-        ax.set_ylabel("utilisation")
-        ax.set_title(label, fontsize=11, pad=8)
-        ax.legend(loc="best", frameon=False, fontsize=8)
-
-    axes[0].text(
+    axes[1, 0].set_xlabel("time of day (HH:MM)")
+    axes[1, 1].set_xlabel("time of day (HH:MM)")
+    fig.suptitle(f"RQ2 Flexibility Components: Annual Mean-Day View ({year})", fontsize=14, y=0.995)
+    fig.text(
         0.5,
-        1.08,
-        f"Two-day diagnostic around the characteristic day ({year}). Event windows are 14:00-22:00 on weekdays; numbered arrows show which reduced slots are paired with which recovery slots inside the allowed recovery window.",
-        transform=axes[0].transAxes,
+        0.955,
+        "Reductions occur in the selected 3-hour peak block; recovery is constrained to 22:00-02:00 and averaged over the full year.",
         ha="center",
-        va="bottom",
-        fontsize=9.5,
+        va="top",
+        fontsize=10,
         color="#444444",
     )
-    axes[-1].set_xlabel("timestamp")
-    apply_two_day_x_axis(axes[-1], window_df["timestamp"].reset_index(drop=True))
-
-    fig.tight_layout()
+    fig.tight_layout(rect=(0, 0, 1, 0.94))
     fig.savefig(out_file, dpi=220)
     plt.close(fig)
 
 
-def plot_two_day_aggregated_diagnostic(year_df: pd.DataFrame, characteristic_day: pd.Timestamp, year: int, out_file: Path) -> None:
-    window_df = get_two_day_window(year_df, characteristic_day)
-    if window_df.empty:
-        return
-
-    x = np.arange(len(window_df))
-    event_mask = get_event_window_mask(window_df["timestamp"])
-
-    fig, axes = plt.subplots(2, 1, figsize=(14, 9), sharex=True)
-    scenario_defs = [
+def plot_annual_48h_shift_window(
+    year_df: pd.DataFrame,
+    year: int,
+    dt_hours: float,
+    out_file: Path,
+) -> None:
+    horizon_df = build_annual_mean_horizon(year_df, dt_hours=dt_hours, horizon_hours=48.0)
+    x = horizon_df["horizon_hour"].to_numpy(dtype=float)
+    scenarios = [
         ("10", "10% Flex", "#f28e2b"),
         ("25", "25% Flex", "#59a14f"),
     ]
 
-    for ax, (suffix, label, color) in zip(axes, scenario_defs):
-        scenario_col = f"load_flex_{suffix}"
-        shift_down_col = f"shift_down_{suffix}"
-        shift_up_col = f"shift_up_{suffix}"
+    fig, axes = plt.subplots(2, 1, figsize=(14, 8), sharex=True)
+    for ax, (suffix, label, color) in zip(axes, scenarios):
+        flex_col = f"load_flex_{suffix}"
+        down_col = f"shift_down_{suffix}"
+        up_col = f"shift_up_{suffix}"
 
-        ax.plot(x, window_df["utilisation"], label="Baseline Load", linewidth=2.3, color="#173f5f", zorder=4)
-        ax.plot(x, window_df[scenario_col], label=label, linewidth=1.9, color=color, alpha=0.90, zorder=3)
-
+        ax.plot(x, horizon_df["utilisation"], label="Annual mean baseline", linewidth=2.2, color="#173f5f")
+        ax.plot(x, horizon_df[flex_col], label=label, linewidth=2.0, color=color)
         ax.fill_between(
             x,
-            window_df["utilisation"],
-            window_df[scenario_col],
-            where=((window_df[shift_down_col].to_numpy(dtype=float) > 1e-10) & event_mask),
-            color="#7cc576",
+            horizon_df["utilisation"],
+            horizon_df[flex_col],
+            where=horizon_df[down_col].to_numpy(dtype=float) > 1e-10,
+            color="#8fd19e",
             alpha=0.28,
-            label="Reduced in event window",
+            label="peak reduction",
         )
         ax.fill_between(
             x,
-            window_df["utilisation"],
-            window_df[scenario_col],
-            where=(window_df[shift_up_col].to_numpy(dtype=float) > 1e-10),
-            color="#d1495b",
-            alpha=0.18,
-            label="Recovered in other slots",
+            horizon_df["utilisation"],
+            horizon_df[flex_col],
+            where=horizon_df[up_col].to_numpy(dtype=float) > 1e-10,
+            color="#f4b7b2",
+            alpha=0.20,
+            label="overnight recovery",
         )
-
-        for idx in np.where(event_mask)[0]:
-            ax.axvspan(idx - 0.5, idx + 0.5, color="#999999", alpha=0.04, linewidth=0)
-
-        apply_zoomed_ylim(ax, window_df["utilisation"], window_df[scenario_col])
-        draw_aggregated_transfer_annotations(ax, window_df, suffix, color)
+        for start, end in [(22, 26), (46, 48)]:
+            ax.axvspan(start, end, color="#bdd7e7", alpha=0.12, linewidth=0)
+        apply_zoomed_ylim(ax, horizon_df["utilisation"], horizon_df[flex_col])
         ax.set_ylabel("utilisation")
         ax.set_title(label, fontsize=11, pad=8)
-        ax.legend(loc="best", frameon=False, fontsize=8)
+        price_ax = add_price_axis(ax, x, horizon_df, label="UK price")
+        merge_legends(ax, [price_ax], loc="best", frameon=False, fontsize=8)
+        ax.grid(alpha=0.22)
 
-    axes[0].text(
+    axes[-1].set_xlabel("hour of annual mean 48-hour profile")
+    apply_horizon_hour_axis(axes[-1], x)
+    fig.suptitle(f"RQ2 Flexibility: Annual Mean 48-Hour Shift Window ({year})", fontsize=14, y=0.995)
+    fig.text(
         0.5,
-        1.08,
-        f"Aggregated two-day diagnostic around the characteristic day ({year}). Each arrow aggregates one event-slot reduction to its weighted-average recovery location inside the allowed recovery window.",
-        transform=axes[0].transAxes,
+        0.955,
+        "Annual mean 0-48h profile averaged from all rolling 48-hour windows in the selected year; no specific calendar days are shown.",
         ha="center",
-        va="bottom",
-        fontsize=9.5,
+        va="top",
+        fontsize=10,
         color="#444444",
     )
-    axes[-1].set_xlabel("timestamp")
-    apply_two_day_x_axis(axes[-1], window_df["timestamp"].reset_index(drop=True))
-
-    fig.tight_layout()
+    fig.tight_layout(rect=(0, 0, 1, 0.93))
     fig.savefig(out_file, dpi=220)
     plt.close(fig)
 
 
-def make_flex_summary(day_df: pd.DataFrame, flex_daily_stats: pd.DataFrame) -> pd.DataFrame:
-    original_peak = float(day_df["utilisation"].max())
-    original_energy = float(day_df["utilisation"].sum())
-    characteristic_day = pd.Timestamp(day_df["date"].iloc[0])
+def _scenario_definition(scenario_key: str | None) -> str:
+    if scenario_key == "10":
+        return "up to 10% reduction for max 3 consecutive peak hours; shifted to 22:00-02:00"
+    if scenario_key == "25":
+        return "up to 25% reduction for max 3 consecutive peak hours; shifted to 22:00-02:00"
+    return "no flexibility applied"
+
+
+def make_flex_summary(
+    mean_day_df: pd.DataFrame,
+    year_df: pd.DataFrame,
+    flex_daily_stats: pd.DataFrame,
+    dt_hours: float,
+) -> pd.DataFrame:
+    original_peak_year = float(year_df["utilisation"].max())
+    original_energy_year = float(year_df["utilisation"].sum() * dt_hours)
+    original_energy_mean_day = float(mean_day_df["utilisation"].sum() * dt_hours)
 
     scenario_defs = [
         ("Original", "utilisation", None),
@@ -492,63 +435,93 @@ def make_flex_summary(day_df: pd.DataFrame, flex_daily_stats: pd.DataFrame) -> p
 
     rows = []
     for scenario, col, scenario_key in scenario_defs:
-        peak_load = float(day_df[col].max())
-        daily_energy = float(day_df[col].sum())
-        max_increase = float(np.maximum(0.0, day_df[col] - day_df["utilisation"]).max())
-        halfhours_above_original = int(np.sum((day_df[col] - day_df["utilisation"]).to_numpy(dtype=float) > 1e-10))
+        mean_day_peak = float(mean_day_df[col].max())
+        mean_day_energy = float(mean_day_df[col].sum() * dt_hours)
+        annual_energy = float(year_df[col].sum() * dt_hours)
+        residual_peak_after_flex = float(year_df[col].max())
+        max_increase = float(np.maximum(0.0, mean_day_df[col] - mean_day_df["utilisation"]).max())
+        halfhours_above_original = int(
+            np.sum((mean_day_df[col] - mean_day_df["utilisation"]).to_numpy(dtype=float) > 1e-10)
+        )
         shifted_energy = 0.0
         unmet_energy = 0.0
+        active_flex_days = 0
+        recipient_window = ""
+        max_peak_hours = np.nan
 
         if scenario_key is not None:
-            shifted_energy = float(day_df[f"shift_down_{scenario_key}"].sum() * 0.5)
             daily_subset = flex_daily_stats[
                 (flex_daily_stats["scenario_key"] == scenario_key)
-                & (pd.to_datetime(flex_daily_stats["date"]) == characteristic_day)
             ]
+            shifted_energy = float(daily_subset["shiftable_realized"].sum() * dt_hours) if not daily_subset.empty else 0.0
+            unmet_energy = float(daily_subset["shiftable_unmet"].sum() * dt_hours) if not daily_subset.empty else 0.0
             if not daily_subset.empty:
-                unmet_energy = float(daily_subset["shiftable_unmet"].iloc[0] * 0.5)
+                active_flex_days = int(np.sum(daily_subset["active_event_day"].to_numpy(dtype=bool)))
+                recipient_window = str(daily_subset["recipient_window"].dropna().iloc[0])
+                max_peak_hours = float(daily_subset["max_peak_hours"].dropna().iloc[0])
 
         rows.append(
             {
                 "scenario": scenario,
-                "peak_load": peak_load,
-                "peak_reduction_vs_original_percent": (
-                    (original_peak - peak_load) / original_peak * 100.0 if original_peak > 0 else 0.0
+                "profile_basis": "annual_mean_day",
+                "operational_definition": _scenario_definition(scenario_key),
+                "original_peak_load": original_peak_year,
+                "residual_peak_after_flex": residual_peak_after_flex,
+                "annual_peak_reduction_vs_original_percent": (
+                    (original_peak_year - residual_peak_after_flex) / original_peak_year * 100.0
+                    if original_peak_year > 0
+                    else 0.0
                 ),
-                "daily_energy": daily_energy,
-                "daily_energy_delta_percent": (
-                    (daily_energy - original_energy) / original_energy * 100.0 if original_energy > 0 else 0.0
+                "mean_day_peak_load": mean_day_peak,
+                "mean_day_energy_utilisation_hours": mean_day_energy,
+                "mean_day_energy_delta_percent": (
+                    (mean_day_energy - original_energy_mean_day) / original_energy_mean_day * 100.0
+                    if original_energy_mean_day > 0
+                    else 0.0
                 ),
-                "shifted_energy_utilisation_hours": shifted_energy,
-                "unmet_energy_utilisation_hours": unmet_energy,
-                "max_increase_vs_original": max_increase,
-                "halfhours_above_original": halfhours_above_original,
+                "annual_energy_utilisation_hours": annual_energy,
+                "annual_energy_delta_percent": (
+                    (annual_energy - original_energy_year) / original_energy_year * 100.0
+                    if original_energy_year > 0
+                    else 0.0
+                ),
+                "shifted_energy_utilisation_hours_year": shifted_energy,
+                "unmet_shift_budget_utilisation_hours_year": unmet_energy,
+                "max_increase_vs_original_mean_day": max_increase,
+                "halfhours_above_original_mean_day": halfhours_above_original,
+                "active_flex_days": active_flex_days,
+                "max_peak_hours": max_peak_hours,
+                "recipient_window": recipient_window,
             }
         )
 
     out = pd.DataFrame(rows)
-    numeric_cols = [c for c in out.columns if c != "scenario"]
+    numeric_cols = [
+        c
+        for c in out.columns
+        if c not in {"scenario", "profile_basis", "operational_definition", "recipient_window"}
+    ]
     out[numeric_cols] = out[numeric_cols].round(4)
     return out
 
 
 def run_rq2(
-    day_df: pd.DataFrame,
+    mean_day_df: pd.DataFrame,
     year_df: pd.DataFrame,
     flex_daily_stats: pd.DataFrame,
     year: int,
+    dt_hours: float,
     output_dir: Path,
-) -> tuple[Path, Path]:
-    _ = year_df
-
+) -> list[Path]:
+    output_dir.mkdir(parents=True, exist_ok=True)
     figure_file = output_dir / "figure1_flex_intermediate.png"
-    diagnostic_file = output_dir / "figure1_flex_intermediate_two_day.png"
-    diagnostic_agg_file = output_dir / "figure1_flex_intermediate_two_day_aggregated.png"
+    components_file = output_dir / "figure1_flex_intermediate_annual_shift_components.png"
+    horizon_file = output_dir / "figure1_flex_intermediate_annual_48h_shift_window.png"
     summary_file = output_dir / "flexibility_summary_intermediate.csv"
 
-    plot_figure1(day_df, year, figure_file)
-    plot_two_day_diagnostic(year_df, pd.Timestamp(day_df["date"].iloc[0]), year, diagnostic_file)
-    plot_two_day_aggregated_diagnostic(year_df, pd.Timestamp(day_df["date"].iloc[0]), year, diagnostic_agg_file)
-    make_flex_summary(day_df, flex_daily_stats).to_csv(summary_file, index=False)
+    plot_figure1(mean_day_df, year, figure_file)
+    plot_annual_shift_components(mean_day_df, year, components_file)
+    plot_annual_48h_shift_window(year_df, year, dt_hours=dt_hours, out_file=horizon_file)
+    make_flex_summary(mean_day_df, year_df, flex_daily_stats, dt_hours=dt_hours).to_csv(summary_file, index=False)
 
-    return figure_file, summary_file
+    return [figure_file, components_file, horizon_file, summary_file]

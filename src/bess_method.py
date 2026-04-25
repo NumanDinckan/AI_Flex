@@ -231,12 +231,25 @@ def solve_peak_cap_dispatch_lp(
     terminal_soc_target: float,
     historical_peak: float,
     step_h: float,
+    price: np.ndarray | None = None,
     round_trip_eff: float = ROUND_TRIP_EFFICIENCY,
     peak_tol: float = 1e-5,
     slack_tol: float = 1e-6,
 ) -> dict[str, np.ndarray | float | bool]:
     base_load = np.asarray(load, dtype=float)
     n = base_load.size
+    price_signal: np.ndarray | None = None
+    if price is not None:
+        candidate_price = np.asarray(price, dtype=float)
+        if candidate_price.size == n and not np.isnan(candidate_price).all():
+            fill_value = float(np.nanmedian(candidate_price))
+            candidate_price = np.where(np.isnan(candidate_price), fill_value, candidate_price)
+            price_range = float(candidate_price.max() - candidate_price.min())
+            if price_range > 1e-12:
+                price_signal = (candidate_price - float(candidate_price.min())) / price_range
+            else:
+                price_signal = np.zeros(n, dtype=float)
+
     if n == 0 or battery_power <= 0 or battery_energy <= 0 or step_h <= 0:
         return simulate_peak_cap_dispatch(
             load=base_load,
@@ -366,8 +379,13 @@ def solve_peak_cap_dispatch_lp(
     slack_row[idx_sp] = 1.0
     slack_row[idx_sm] = 1.0
     stage3_obj = np.zeros(var_count, dtype=float)
-    stage3_obj[idx_c:idx_d] = step_h
-    stage3_obj[idx_d:idx_e] = step_h
+    if price_signal is not None:
+        throughput_tiebreaker = 1e-6 * step_h
+        stage3_obj[idx_c:idx_d] = price_signal * step_h + throughput_tiebreaker
+        stage3_obj[idx_d:idx_e] = -price_signal * step_h + throughput_tiebreaker
+    else:
+        stage3_obj[idx_c:idx_d] = step_h
+        stage3_obj[idx_d:idx_e] = step_h
     stage3 = solve_lp(
         stage3_obj,
         extra_a_ub=[cap_row, slack_row],
@@ -399,12 +417,18 @@ def solve_peak_cap_dispatch_lp(
         "max_soc": float(soc_trace.max()),
         "target_power": m_star,
         "terminal_slack": slack_star,
+        "price_signal_used": price_signal is not None,
         "feasible": True,
     }
 
 
-def simulate_bess(df: pd.DataFrame, step_h: float = 0.5) -> tuple[pd.DataFrame, pd.DataFrame]:
+def simulate_bess(
+    df: pd.DataFrame,
+    step_h: float = 0.5,
+    price_col: str | None = None,
+) -> tuple[pd.DataFrame, pd.DataFrame]:
     out = df.copy().sort_values(["year", "date", "halfhour_index", "timestamp"]).reset_index(drop=True)
+    has_price = bool(price_col and price_col in out.columns)
 
     for scenario in BESS_SCENARIOS:
         for col in [
@@ -437,7 +461,8 @@ def simulate_bess(df: pd.DataFrame, step_h: float = 0.5) -> tuple[pd.DataFrame, 
                 horizon_idx = np.concatenate([index_by_date[d] for d in horizon_dates])
 
                 horizon_load = out.loc[horizon_idx, scenario.flex_col].to_numpy(dtype=float)
-                controller_method = "two_day_peak_cap_lp"
+                horizon_price = out.loc[horizon_idx, price_col].to_numpy(dtype=float) if has_price else None
+                controller_method = "rolling_48h_peak_cap_price_lp" if has_price else "rolling_48h_peak_cap_lp"
                 used_fallback = False
                 terminal_slack = 0.0
                 historical_peak_before_dispatch = float(historical_peak)
@@ -450,6 +475,7 @@ def simulate_bess(df: pd.DataFrame, step_h: float = 0.5) -> tuple[pd.DataFrame, 
                         terminal_soc_target=current_soc,
                         historical_peak=historical_peak,
                         step_h=step_h,
+                        price=horizon_price,
                     )
                     terminal_slack = float(dispatch.get("terminal_slack", 0.0))
                 except RuntimeError:
@@ -463,7 +489,7 @@ def simulate_bess(df: pd.DataFrame, step_h: float = 0.5) -> tuple[pd.DataFrame, 
                         terminal_soc_target=current_soc,
                         step_h=step_h,
                     )
-                    controller_method = "two_day_peak_cap_fallback"
+                    controller_method = "rolling_48h_peak_cap_price_fallback" if has_price else "rolling_48h_peak_cap_fallback"
                     used_fallback = True
 
                 n_exec = len(exec_idx)
@@ -472,6 +498,7 @@ def simulate_bess(df: pd.DataFrame, step_h: float = 0.5) -> tuple[pd.DataFrame, 
                 exec_charge = np.asarray(dispatch["charge_power"], dtype=float)[:n_exec]
                 exec_discharge = np.asarray(dispatch["discharge_power"], dtype=float)[:n_exec]
                 exec_net_power = np.asarray(dispatch["net_battery_power"], dtype=float)[:n_exec]
+                exec_price = np.asarray(horizon_price, dtype=float)[:n_exec] if horizon_price is not None else None
 
                 out.loc[exec_idx, scenario.load_col] = exec_load
                 out.loc[exec_idx, scenario.soc_col] = exec_soc
@@ -481,6 +508,9 @@ def simulate_bess(df: pd.DataFrame, step_h: float = 0.5) -> tuple[pd.DataFrame, 
 
                 total_charge = float(exec_charge.sum() * step_h)
                 total_discharge = float(exec_discharge.sum() * step_h)
+                energy_cost_proxy = (
+                    float(np.sum(exec_load * exec_price * step_h)) if exec_price is not None else np.nan
+                )
                 peak_pre_bess = float(out.loc[exec_idx, scenario.flex_col].max())
                 peak_post_bess = float(exec_load.max()) if exec_load.size else peak_pre_bess
                 final_soc = float(exec_soc[-1]) if exec_soc.size else float(current_soc)
@@ -506,6 +536,9 @@ def simulate_bess(df: pd.DataFrame, step_h: float = 0.5) -> tuple[pd.DataFrame, 
                         "max_soc": float(exec_soc.max()) if exec_soc.size else float(current_soc),
                         "target_grid_power": float(dispatch["target_power"]),
                         "terminal_soc_slack": terminal_slack,
+                        "price_signal_used": bool(dispatch.get("price_signal_used", False)),
+                        "mean_price": float(np.mean(exec_price)) if exec_price is not None else np.nan,
+                        "energy_cost_proxy": energy_cost_proxy,
                         "total_charge": total_charge,
                         "total_discharge": total_discharge,
                         "cycles": float((total_charge + total_discharge) / (2.0 * battery_energy)) if battery_energy > 0 else 0.0,

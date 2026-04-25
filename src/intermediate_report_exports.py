@@ -5,6 +5,7 @@ import gzip
 from dataclasses import dataclass
 from pathlib import Path
 
+import numpy as np
 import pandas as pd
 
 from bess_method import simulate_bess
@@ -22,13 +23,16 @@ REQUIRED_COLUMNS = [
     "hh_utilisation_ratio",
 ]
 
+DEFAULT_PRICE_INPUT = Path("data/raw/United Kingdom.csv")
+DEFAULT_PRICE_TIMESTAMP_COL = "Datetime (UTC)"
+DEFAULT_PRICE_COL = "Price (EUR/MWhe)"
+
 
 @dataclass
 class CoreAnalysisResults:
     battery_daily_stats: pd.DataFrame
     flex_daily_stats: pd.DataFrame
     timeseries: pd.DataFrame
-    characteristic_days: dict[int, pd.Timestamp]
 
 
 @dataclass
@@ -37,12 +41,13 @@ class ReportContext:
     min_utilisation: float
     dt_hours: float
     output_dir: Path
-    characteristic_day: pd.Timestamp
-    day_df: pd.DataFrame
+    mean_day_df: pd.DataFrame
+    mean_48h_df: pd.DataFrame
     year_df: pd.DataFrame
     centres_year_df: pd.DataFrame | None
     flex_daily_stats: pd.DataFrame
     battery_daily_stats: pd.DataFrame
+    price_input: Path | None
 
 
 def get_rq_output_dir(base_output_dir: Path, rq_name: str) -> Path:
@@ -52,19 +57,17 @@ def get_rq_output_dir(base_output_dir: Path, rq_name: str) -> Path:
 
 
 def add_common_report_args(parser: argparse.ArgumentParser) -> argparse.ArgumentParser:
-    parser.add_argument("--input", type=str, default="data/raw/ukpn-data-centre-demand-profiles.csv.gz")
-    parser.add_argument("--output-dir", type=str, default=".")
+    parser.add_argument("--input", type=str, default="data/raw/ukpn-data-centre-demand-profiles.csv")
+    parser.add_argument("--output-dir", type=str, default="outputs")
     parser.add_argument("--year", type=int, default=2025)
-    parser.add_argument(
-        "--characteristic-day",
-        type=str,
-        default="",
-        help="Optional override for the characteristic day, formatted as YYYY-MM-DD.",
-    )
     parser.add_argument("--dt-hours", type=float, default=0.5)
     parser.add_argument("--dc-type", type=str, default="")
     parser.add_argument("--voltage-level", type=str, default="High Voltage Import")
     parser.add_argument("--centres", type=str, default="")
+    parser.add_argument("--price-input", type=str, default="")
+    parser.add_argument("--price-timestamp-col", type=str, default=DEFAULT_PRICE_TIMESTAMP_COL)
+    parser.add_argument("--price-col", type=str, default=DEFAULT_PRICE_COL)
+    parser.add_argument("--price-tolerance-minutes", type=float, default=30.0)
     parser.add_argument(
         "--min-utilisation",
         type=float,
@@ -164,6 +167,13 @@ def prepare_features(df: pd.DataFrame) -> pd.DataFrame:
 def add_baselines(df: pd.DataFrame) -> pd.DataFrame:
     out = df.copy()
 
+    mean_day_base = (
+        out.groupby(["year", "halfhour_index"], observed=True)["utilisation"]
+        .mean()
+        .rename("mean_day_base")
+    )
+    out = out.join(mean_day_base, on=["year", "halfhour_index"])
+
     med_base = (
         out.groupby(["year", "weekday", "halfhour_index"], observed=True)["utilisation"]
         .median()
@@ -181,31 +191,97 @@ def add_baselines(df: pd.DataFrame) -> pd.DataFrame:
     return out
 
 
-def find_characteristic_days(df: pd.DataFrame) -> dict[int, pd.Timestamp]:
-    daily_peaks = (
-        df.groupby(["year", "date"], as_index=False)["utilisation"].max().rename(columns={"utilisation": "day_peak"})
-    )
+def build_annual_mean_day(year_df: pd.DataFrame, year: int, dt_hours: float) -> pd.DataFrame:
+    if year_df.empty:
+        raise ValueError(f"No rows found for annual mean-day profile in year {year}.")
 
-    characteristic: dict[int, pd.Timestamp] = {}
-    for year, g in daily_peaks.groupby("year", sort=True):
-        idx = g["day_peak"].idxmax()
-        characteristic[int(year)] = pd.Timestamp(g.loc[idx, "date"])
+    steps_per_day = int(round(24.0 / dt_hours))
+    index = range(steps_per_day)
+    numeric_cols = [
+        col
+        for col in year_df.columns
+        if pd.api.types.is_numeric_dtype(year_df[col])
+        and col not in {"year", "month", "weekday", "halfhour_index"}
+    ]
 
-    return characteristic
+    profile = year_df.groupby("halfhour_index", observed=True)[numeric_cols].mean().reindex(index)
+    profile = profile.interpolate(limit_direction="both")
+    profile = profile.reset_index().rename(columns={"index": "halfhour_index"})
+
+    base_date = pd.Timestamp(f"{year}-01-01")
+    profile["timestamp"] = [base_date + pd.Timedelta(hours=i * dt_hours) for i in index]
+    profile["date"] = base_date
+    profile["year"] = year
+    profile["month"] = 0
+    profile["weekday"] = -1
+    profile["profile_basis"] = "annual_mean_day"
+    return profile
+
+
+def build_annual_mean_horizon(
+    year_df: pd.DataFrame,
+    year: int,
+    dt_hours: float,
+    horizon_hours: float = 48.0,
+) -> pd.DataFrame:
+    if year_df.empty:
+        raise ValueError(f"No rows found for annual mean-horizon profile in year {year}.")
+
+    steps = int(round(horizon_hours / dt_hours))
+    day_steps = int(round(24.0 / dt_hours))
+    numeric_cols = [
+        col
+        for col in year_df.columns
+        if pd.api.types.is_numeric_dtype(year_df[col])
+        and col not in {"year", "month", "weekday", "halfhour_index"}
+    ]
+
+    windows: list[pd.DataFrame] = []
+    for date in sorted(pd.to_datetime(year_df["date"].dropna().unique())):
+        start = pd.Timestamp(date)
+        end = start + pd.Timedelta(hours=horizon_hours)
+        window = year_df[(year_df["timestamp"] >= start) & (year_df["timestamp"] < end)].copy()
+        if window.empty:
+            continue
+        elapsed_hours = (window["timestamp"] - start).dt.total_seconds() / 3600.0
+        window["horizon_index"] = np.rint(elapsed_hours / dt_hours).astype(int)
+        window = window[(window["horizon_index"] >= 0) & (window["horizon_index"] < steps)]
+        if not window.empty:
+            windows.append(window[["horizon_index", *numeric_cols]])
+
+    if windows:
+        stacked = pd.concat(windows, ignore_index=True)
+        profile = stacked.groupby("horizon_index", observed=True)[numeric_cols].mean().reindex(range(steps))
+    else:
+        mean_day = build_annual_mean_day(year_df, year, dt_hours)
+        repeated = pd.concat([mean_day[numeric_cols]] * int(round(horizon_hours / 24.0)), ignore_index=True)
+        profile = repeated.iloc[:steps].copy()
+        profile.index.name = "horizon_index"
+
+    profile = profile.interpolate(limit_direction="both")
+    profile = profile.reset_index()
+    profile["horizon_hour"] = profile["horizon_index"] * dt_hours
+    profile["halfhour_index"] = profile["horizon_index"] % day_steps
+    profile["timestamp"] = pd.NaT
+    profile["date"] = pd.NaT
+    profile["year"] = year
+    profile["month"] = 0
+    profile["weekday"] = -1
+    profile["profile_basis"] = f"annual_mean_{int(horizon_hours)}h_horizon"
+    return profile
 
 
 def run_core_analysis(df: pd.DataFrame, dt_hours: float) -> CoreAnalysisResults:
     ts = prepare_features(df)
     ts = add_baselines(ts)
     ts, flex_daily_stats = add_flex(ts, dt_hours=dt_hours)
-    ts, battery_daily_stats = simulate_bess(ts, step_h=dt_hours)
-    characteristic_days = find_characteristic_days(ts)
+    price_col = "uk_price" if "uk_price" in ts.columns else None
+    ts, battery_daily_stats = simulate_bess(ts, step_h=dt_hours, price_col=price_col)
 
     return CoreAnalysisResults(
         battery_daily_stats=battery_daily_stats,
         flex_daily_stats=flex_daily_stats,
         timeseries=ts,
-        characteristic_days=characteristic_days,
     )
 
 
@@ -270,6 +346,46 @@ def load_centre_year_timeseries(
     return pd.concat(parts, ignore_index=True)
 
 
+def load_price_timeseries(
+    csv_path: Path,
+    timestamp_col: str,
+    price_col: str,
+) -> pd.DataFrame:
+    delimiter = detect_delimiter(csv_path)
+    prices = pd.read_csv(
+        csv_path,
+        usecols=[timestamp_col, price_col],
+        delimiter=delimiter,
+        encoding="utf-8-sig",
+    )
+    prices = prices.rename(columns={timestamp_col: "timestamp", price_col: "uk_price"})
+    prices["timestamp"] = pd.to_datetime(prices["timestamp"], errors="coerce")
+    prices["uk_price"] = pd.to_numeric(prices["uk_price"], errors="coerce")
+    prices = prices.dropna(subset=["timestamp", "uk_price"])
+    if prices.empty:
+        raise ValueError(f"No usable price rows found in {csv_path}.")
+    return prices.groupby("timestamp", as_index=False)["uk_price"].mean().sort_values("timestamp")
+
+
+def attach_price_signal(
+    load_df: pd.DataFrame,
+    price_df: pd.DataFrame,
+    tolerance_minutes: float,
+) -> pd.DataFrame:
+    tolerance = pd.Timedelta(minutes=tolerance_minutes)
+    out = pd.merge_asof(
+        load_df.sort_values("timestamp"),
+        price_df.sort_values("timestamp"),
+        on="timestamp",
+        direction="nearest",
+        tolerance=tolerance,
+    )
+    matched = int(out["uk_price"].notna().sum())
+    if matched == 0:
+        raise ValueError("Price input did not match any load timestamps within the configured tolerance.")
+    return out
+
+
 def build_context(args: argparse.Namespace, include_rq1_data: bool) -> ReportContext:
     if args.dt_hours <= 0:
         raise ValueError("--dt-hours must be positive.")
@@ -290,29 +406,36 @@ def build_context(args: argparse.Namespace, include_rq1_data: bool) -> ReportCon
         chunksize=args.chunksize,
     )
 
+    price_input = Path(args.price_input) if args.price_input else (DEFAULT_PRICE_INPUT if DEFAULT_PRICE_INPUT.exists() else None)
+    if price_input is not None:
+        price_csv = price_input
+        if not price_csv.exists():
+            raise FileNotFoundError(f"Price CSV not found: {price_csv}")
+        price_df = load_price_timeseries(
+            csv_path=price_csv,
+            timestamp_col=args.price_timestamp_col,
+            price_col=args.price_col,
+        )
+        df = attach_price_signal(
+            load_df=df,
+            price_df=price_df,
+            tolerance_minutes=args.price_tolerance_minutes,
+        )
+
     results = run_core_analysis(df, dt_hours=args.dt_hours)
 
-    if args.year not in results.characteristic_days:
-        available = sorted(results.characteristic_days.keys())
+    available_years = sorted(int(year) for year in results.timeseries["year"].dropna().unique())
+    if args.year not in available_years:
+        available = available_years
         raise ValueError(f"Requested year {args.year} not available. Available years: {available}")
 
-    if args.characteristic_day:
-        characteristic_day = pd.Timestamp(args.characteristic_day).floor("D")
-        if characteristic_day.year != args.year:
-            raise ValueError(
-                f"--characteristic-day year ({characteristic_day.year}) must match --year ({args.year})."
-            )
-    else:
-        characteristic_day = results.characteristic_days[args.year]
-
-    day_df = results.timeseries[
-        (results.timeseries["year"] == args.year) & (results.timeseries["date"] == characteristic_day)
-    ].sort_values("halfhour_index")
     year_df = results.timeseries[results.timeseries["year"] == args.year].sort_values("timestamp").copy()
+    mean_day_df = build_annual_mean_day(year_df=year_df, year=args.year, dt_hours=args.dt_hours)
+    mean_48h_df = build_annual_mean_horizon(year_df=year_df, year=args.year, dt_hours=args.dt_hours, horizon_hours=48.0)
     flex_daily_stats = results.flex_daily_stats[results.flex_daily_stats["year"] == args.year].copy()
 
-    if day_df.empty:
-        raise ValueError(f"No characteristic-day data found for year {args.year}.")
+    if mean_day_df.empty:
+        raise ValueError(f"No annual mean-day profile could be built for year {args.year}.")
 
     centres_year_df: pd.DataFrame | None = None
     if include_rq1_data:
@@ -331,12 +454,13 @@ def build_context(args: argparse.Namespace, include_rq1_data: bool) -> ReportCon
         min_utilisation=args.min_utilisation,
         dt_hours=args.dt_hours,
         output_dir=output_dir,
-        characteristic_day=characteristic_day,
-        day_df=day_df,
+        mean_day_df=mean_day_df,
+        mean_48h_df=mean_48h_df,
         year_df=year_df,
         centres_year_df=centres_year_df,
         flex_daily_stats=flex_daily_stats,
         battery_daily_stats=results.battery_daily_stats,
+        price_input=price_input,
     )
 
 
@@ -366,36 +490,39 @@ def main() -> None:
         rq1_files = run_rq1(
             centres_year_df=context.centres_year_df,
             year=context.year,
-            characteristic_day=context.characteristic_day,
             output_dir=rq1_output_dir,
         )
         saved_files.extend([str(p.resolve()) for p in rq1_files])
 
     if args.rq in {"all", "rq2"}:
         rq2_output_dir = get_rq_output_dir(context.output_dir, "rq2")
-        fig, table = run_rq2(
-            day_df=context.day_df,
+        rq2_files = run_rq2(
+            mean_day_df=context.mean_day_df,
             year_df=context.year_df,
             flex_daily_stats=context.flex_daily_stats,
             year=context.year,
+            dt_hours=context.dt_hours,
             output_dir=rq2_output_dir,
         )
-        saved_files.extend([str(fig.resolve()), str(table.resolve())])
+        saved_files.extend([str(path.resolve()) for path in rq2_files])
 
     if args.rq in {"all", "rq3"}:
         rq3_output_dir = get_rq_output_dir(context.output_dir, "rq3")
         fig10, fig25, table = run_rq3(
-            day_df=context.day_df,
+            mean_horizon_df=context.mean_48h_df,
             year_df=context.year_df,
             battery_daily_stats=context.battery_daily_stats,
             year=context.year,
+            dt_hours=context.dt_hours,
             output_dir=rq3_output_dir,
         )
         saved_files.extend([str(fig10.resolve()), str(fig25.resolve()), str(table.resolve())])
 
     print(f"RQ selection: {args.rq}")
     print(f"Year selected: {context.year}")
-    print(f"Characteristic day: {context.characteristic_day.date()}")
+    print("RQ1/RQ2 profile basis: annual mean day")
+    print("RQ3 profile basis: annual mean 48-hour horizon")
+    print(f"Price input: {context.price_input if context.price_input is not None else 'none'}")
     print(f"Min utilisation filter: > {context.min_utilisation}")
     print(f"dt_hours: {context.dt_hours}")
     for path in saved_files:

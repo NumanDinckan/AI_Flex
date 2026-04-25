@@ -6,14 +6,7 @@ import matplotlib.pyplot as plt
 import numpy as np
 import pandas as pd
 
-from rq2_figure1 import apply_delta_ylim, apply_two_day_x_axis, apply_zoomed_ylim
-
-
-def get_forward_two_day_window(year_df: pd.DataFrame, characteristic_day: pd.Timestamp) -> pd.DataFrame:
-    start = pd.Timestamp(characteristic_day)
-    end = start + pd.Timedelta(days=2)
-    out = year_df[(year_df["timestamp"] >= start) & (year_df["timestamp"] < end)].copy()
-    return out.sort_values("timestamp").reset_index(drop=True)
+from rq2_figure1 import add_price_axis, apply_delta_ylim, apply_horizon_hour_axis, apply_zoomed_ylim, merge_legends
 
 
 def _lookup_battery_energy(
@@ -30,8 +23,8 @@ def _lookup_battery_energy(
     return float(match["battery_energy"].iloc[0])
 
 
-def _plot_figure2_two_day(
-    window_df: pd.DataFrame,
+def _plot_figure2_mean_horizon(
+    horizon_df: pd.DataFrame,
     year: int,
     out_file: Path,
     flex_col: str,
@@ -46,19 +39,20 @@ def _plot_figure2_two_day(
     title: str,
     flex_label: str,
 ) -> None:
-    x = np.arange(len(window_df))
-    timestamps = window_df["timestamp"].reset_index(drop=True)
-    characteristic_day = pd.Timestamp(window_df["date"].iloc[0])
-    characteristic_steps = int(np.sum(window_df["date"] == characteristic_day))
+    x = (
+        horizon_df["horizon_hour"].to_numpy(dtype=float)
+        if "horizon_hour" in horizon_df.columns
+        else np.arange(len(horizon_df), dtype=float) * 0.5
+    )
 
-    flex = window_df[flex_col]
-    batt4 = window_df[batt4_col]
-    batt8 = window_df[batt8_col]
-    net4 = window_df[net4_col]
-    net8 = window_df[net8_col]
+    flex = horizon_df[flex_col]
+    batt4 = horizon_df[batt4_col]
+    batt8 = horizon_df[batt8_col]
+    net4 = horizon_df[net4_col]
+    net8 = horizon_df[net8_col]
 
-    soc4_pct = 100.0 * window_df[soc4_col] / battery_energy_4h if battery_energy_4h > 0 else np.nan
-    soc8_pct = 100.0 * window_df[soc8_col] / battery_energy_8h if battery_energy_8h > 0 else np.nan
+    soc4_pct = 100.0 * horizon_df[soc4_col] / battery_energy_4h if battery_energy_4h > 0 else np.nan
+    soc8_pct = 100.0 * horizon_df[soc8_col] / battery_energy_8h if battery_energy_8h > 0 else np.nan
 
     fig, (ax_load, ax_power, ax_soc) = plt.subplots(
         3,
@@ -68,11 +62,7 @@ def _plot_figure2_two_day(
         gridspec_kw={"height_ratios": [3.0, 1.8, 1.6]},
     )
 
-    if 0 < characteristic_steps < len(window_df):
-        for ax in (ax_load, ax_power, ax_soc):
-            ax.axvline(characteristic_steps - 0.5, color="#777777", linewidth=1.1, alpha=0.7)
-
-    ax_load.plot(x, window_df["utilisation"], label="Original Load", linewidth=2.0, color="#1f77b4", alpha=0.78)
+    ax_load.plot(x, horizon_df["utilisation"], label="Original Load", linewidth=2.0, color="#1f77b4", alpha=0.78)
     ax_load.plot(
         x,
         flex,
@@ -85,11 +75,11 @@ def _plot_figure2_two_day(
     ax_load.plot(x, batt8, label=f"{flex_label} Flex + 8h Battery", linewidth=1.9, color="#9467bd")
     ax_load.fill_between(x, flex, batt8, where=(batt8 < flex), color="#8fd19e", alpha=0.18, label="8h discharge effect")
     ax_load.fill_between(x, flex, batt8, where=(batt8 > flex), color="#f4b7b2", alpha=0.14, label="8h recharge effect")
-    ax_load.set_title(f"AI Data Center Flexibility with Two-Day BESS Dispatch ({year}, {title})", fontsize=13, pad=12)
+    ax_load.set_title(f"AI Data Center Flexibility with BESS: Annual Mean 48-Hour Horizon ({year}, {title})", fontsize=12.5, pad=28)
     ax_load.text(
         0.5,
-        1.02,
-        "48h look-ahead peak-shaving dispatch. Left of the divider is the characteristic peak day; right is the next day.",
+        1.01,
+        "Annual mean 0-48h profile averaged from all rolling 48-hour windows in the selected year; no specific calendar days are shown.",
         transform=ax_load.transAxes,
         ha="center",
         va="bottom",
@@ -97,9 +87,10 @@ def _plot_figure2_two_day(
         color="#444444",
     )
     ax_load.set_ylabel("utilisation")
-    apply_zoomed_ylim(ax_load, window_df["utilisation"], flex, batt4, batt8)
+    apply_zoomed_ylim(ax_load, horizon_df["utilisation"], flex, batt4, batt8)
+    price_ax = add_price_axis(ax_load, x, horizon_df, label="UK electricity price")
     ax_load.grid(alpha=0.22)
-    ax_load.legend(loc="best", frameon=False, fontsize=8)
+    merge_legends(ax_load, [price_ax], loc="best", frameon=False, fontsize=8)
 
     ax_power.plot(x, net4, color="#d62728", linewidth=1.8, label="4h battery net power")
     ax_power.plot(x, net8, color="#9467bd", linewidth=1.8, label="8h battery net power")
@@ -116,11 +107,11 @@ def _plot_figure2_two_day(
     ax_soc.plot(x, soc4_pct, color="#d62728", linewidth=1.8, label="4h battery SoC")
     ax_soc.plot(x, soc8_pct, color="#9467bd", linewidth=1.8, label="8h battery SoC")
     ax_soc.set_ylabel("SoC (%)")
-    ax_soc.set_xlabel("timestamp")
+    ax_soc.set_xlabel("hour of annual mean 48-hour profile")
     ax_soc.set_ylim(0, 100)
     ax_soc.grid(alpha=0.22)
     ax_soc.legend(loc="best", frameon=False, fontsize=8)
-    apply_two_day_x_axis(ax_soc, timestamps)
+    apply_horizon_hour_axis(ax_soc, x)
 
     fig.tight_layout()
     fig.savefig(out_file, dpi=220)
@@ -128,44 +119,46 @@ def _plot_figure2_two_day(
 
 
 def make_bess_summary(
+    mean_horizon_df: pd.DataFrame,
     year_df: pd.DataFrame,
     battery_daily_stats: pd.DataFrame,
-    characteristic_day: pd.Timestamp,
     year: int,
+    dt_hours: float,
 ) -> pd.DataFrame:
-    window_df = get_forward_two_day_window(year_df, characteristic_day)
-
     annual_peak_original = float(year_df["utilisation"].max())
     annual_peak_flex_10 = float(year_df["load_flex_10"].max())
     annual_peak_flex_25 = float(year_df["load_flex_25"].max())
 
-    window_peak_original = float(window_df["utilisation"].max()) if not window_df.empty else np.nan
-    window_peak_flex_10 = float(window_df["load_flex_10"].max()) if not window_df.empty else np.nan
-    window_peak_flex_25 = float(window_df["load_flex_25"].max()) if not window_df.empty else np.nan
+    mean_horizon_peak_original = float(mean_horizon_df["utilisation"].max())
+    mean_horizon_peak_flex_10 = float(mean_horizon_df["load_flex_10"].max())
+    mean_horizon_peak_flex_25 = float(mean_horizon_df["load_flex_25"].max())
 
     rows = [
         {
             "scenario": "Original (no flex, no BESS)",
             "controller_method": "",
             "battery_duration": "",
+            "profile_basis": "annual_mean_48h_horizon",
+            "original_peak_load": annual_peak_original,
+            "residual_peak_after_flex": annual_peak_original,
+            "residual_peak_after_flex_and_bess": annual_peak_original,
             "annual_peak_load": annual_peak_original,
-            "two_day_window_peak_load": window_peak_original,
+            "mean_horizon_peak_load": mean_horizon_peak_original,
             "annual_peak_reduction_vs_original_percent": 0.0,
             "annual_peak_reduction_vs_matching_flex_only_percent": np.nan,
-            "two_day_window_peak_reduction_vs_original_percent": 0.0,
-            "two_day_window_peak_reduction_vs_matching_flex_only_percent": np.nan,
+            "mean_horizon_peak_reduction_vs_original_percent": 0.0,
+            "mean_horizon_peak_reduction_vs_matching_flex_only_percent": np.nan,
             "total_battery_discharge_energy_year": 0.0,
             "total_battery_charge_energy_year": 0.0,
             "total_cycles_year": 0.0,
             "mean_target_grid_power_year": np.nan,
-            "target_grid_power_window_start": np.nan,
-            "initial_soc_window_start": np.nan,
-            "final_soc_window_end": np.nan,
-            "charge_steps_window": 0,
-            "discharge_steps_window": 0,
-            "min_soc_window": np.nan,
-            "max_soc_window": np.nan,
+            "mean_horizon_charge_steps": 0,
+            "mean_horizon_discharge_steps": 0,
+            "mean_horizon_min_soc": np.nan,
+            "mean_horizon_max_soc": np.nan,
             "terminal_soc_slack_year": 0.0,
+            "price_signal_used": False,
+            "total_grid_cost_proxy_year": np.nan,
         }
     ]
 
@@ -180,7 +173,7 @@ def make_bess_summary(
             "discharge_10_flex_4h_batt",
             "soc_10_flex_4h_batt",
             annual_peak_flex_10,
-            window_peak_flex_10,
+            mean_horizon_peak_flex_10,
         ),
         (
             "10% Flex + 8h BESS",
@@ -192,7 +185,7 @@ def make_bess_summary(
             "discharge_10_flex_8h_batt",
             "soc_10_flex_8h_batt",
             annual_peak_flex_10,
-            window_peak_flex_10,
+            mean_horizon_peak_flex_10,
         ),
         (
             "25% Flex + 4h BESS",
@@ -204,7 +197,7 @@ def make_bess_summary(
             "discharge_25_flex_4h_batt",
             "soc_25_flex_4h_batt",
             annual_peak_flex_25,
-            window_peak_flex_25,
+            mean_horizon_peak_flex_25,
         ),
         (
             "25% Flex + 8h BESS",
@@ -216,77 +209,82 @@ def make_bess_summary(
             "discharge_25_flex_8h_batt",
             "soc_25_flex_8h_batt",
             annual_peak_flex_25,
-            window_peak_flex_25,
+            mean_horizon_peak_flex_25,
         ),
     ]
 
-    window_start = pd.Timestamp(characteristic_day)
-    window_end = window_start + pd.Timedelta(days=2)
-
-    for label, raw_scenario, batt_duration, load_col, flex_col, charge_col, discharge_col, soc_col, annual_peak_flex, window_peak_flex in scenarios:
+    for label, raw_scenario, batt_duration, load_col, flex_col, charge_col, discharge_col, soc_col, annual_peak_flex, mean_horizon_peak_flex in scenarios:
         by_year = battery_daily_stats[
             (battery_daily_stats["year"] == year)
             & (battery_daily_stats["battery_duration"] == batt_duration)
             & (battery_daily_stats["scenario"] == raw_scenario)
         ].copy()
-        by_year["date"] = pd.to_datetime(by_year["date"])
-        by_window = by_year[(by_year["date"] >= window_start) & (by_year["date"] < window_end)].copy()
 
         annual_peak_post = float(year_df[load_col].max())
-        window_peak_post = float(window_df[load_col].max()) if not window_df.empty else np.nan
-
-        start_row = by_year[by_year["date"] == window_start]
+        mean_horizon_peak_post = float(mean_horizon_df[load_col].max()) if not mean_horizon_df.empty else np.nan
+        price_signal_used = bool(by_year["price_signal_used"].any()) if "price_signal_used" in by_year else False
+        total_grid_cost = (
+            float(by_year["energy_cost_proxy"].sum())
+            if "energy_cost_proxy" in by_year and by_year["energy_cost_proxy"].notna().any()
+            else np.nan
+        )
 
         rows.append(
             {
                 "scenario": label,
                 "controller_method": str(by_year["controller_method"].iloc[0]) if not by_year.empty else "",
                 "battery_duration": batt_duration,
+                "profile_basis": "annual_mean_48h_horizon",
+                "original_peak_load": annual_peak_original,
+                "residual_peak_after_flex": annual_peak_flex,
+                "residual_peak_after_flex_and_bess": annual_peak_post,
                 "annual_peak_load": annual_peak_post,
-                "two_day_window_peak_load": window_peak_post,
+                "mean_horizon_peak_load": mean_horizon_peak_post,
                 "annual_peak_reduction_vs_original_percent": (
                     (annual_peak_original - annual_peak_post) / annual_peak_original * 100.0 if annual_peak_original > 0 else 0.0
                 ),
                 "annual_peak_reduction_vs_matching_flex_only_percent": (
                     (annual_peak_flex - annual_peak_post) / annual_peak_flex * 100.0 if annual_peak_flex > 0 else 0.0
                 ),
-                "two_day_window_peak_reduction_vs_original_percent": (
-                    (window_peak_original - window_peak_post) / window_peak_original * 100.0 if window_peak_original > 0 else 0.0
+                "mean_horizon_peak_reduction_vs_original_percent": (
+                    (mean_horizon_peak_original - mean_horizon_peak_post) / mean_horizon_peak_original * 100.0 if mean_horizon_peak_original > 0 else 0.0
                 ),
-                "two_day_window_peak_reduction_vs_matching_flex_only_percent": (
-                    (window_peak_flex - window_peak_post) / window_peak_flex * 100.0 if window_peak_flex > 0 else 0.0
+                "mean_horizon_peak_reduction_vs_matching_flex_only_percent": (
+                    (mean_horizon_peak_flex - mean_horizon_peak_post) / mean_horizon_peak_flex * 100.0 if mean_horizon_peak_flex > 0 else 0.0
                 ),
                 "total_battery_discharge_energy_year": float(by_year["total_discharge"].sum()),
                 "total_battery_charge_energy_year": float(by_year["total_charge"].sum()),
                 "total_cycles_year": float(by_year["cycles"].sum()),
                 "mean_target_grid_power_year": float(by_year["target_grid_power"].mean()) if not by_year.empty else np.nan,
-                "target_grid_power_window_start": float(start_row["target_grid_power"].iloc[0]) if not start_row.empty else np.nan,
-                "initial_soc_window_start": float(start_row["initial_soc"].iloc[0]) if not start_row.empty else np.nan,
-                "final_soc_window_end": float(window_df[soc_col].iloc[-1]) if not window_df.empty else np.nan,
-                "charge_steps_window": int(np.sum(window_df[charge_col].to_numpy(dtype=float) > 1e-10)) if not window_df.empty else 0,
-                "discharge_steps_window": int(np.sum(window_df[discharge_col].to_numpy(dtype=float) > 1e-10)) if not window_df.empty else 0,
-                "min_soc_window": float(window_df[soc_col].min()) if not window_df.empty else np.nan,
-                "max_soc_window": float(window_df[soc_col].max()) if not window_df.empty else np.nan,
+                "mean_horizon_charge_steps": int(np.sum(mean_horizon_df[charge_col].to_numpy(dtype=float) > 1e-10)) if not mean_horizon_df.empty else 0,
+                "mean_horizon_discharge_steps": int(np.sum(mean_horizon_df[discharge_col].to_numpy(dtype=float) > 1e-10)) if not mean_horizon_df.empty else 0,
+                "mean_horizon_min_soc": float(mean_horizon_df[soc_col].min()) if not mean_horizon_df.empty else np.nan,
+                "mean_horizon_max_soc": float(mean_horizon_df[soc_col].max()) if not mean_horizon_df.empty else np.nan,
                 "terminal_soc_slack_year": float(by_year["terminal_soc_slack"].sum()) if "terminal_soc_slack" in by_year else np.nan,
+                "price_signal_used": price_signal_used,
+                "total_grid_cost_proxy_year": total_grid_cost,
             }
         )
 
     out = pd.DataFrame(rows)
-    numeric_cols = [c for c in out.columns if c not in {"scenario", "controller_method", "battery_duration"}]
+    numeric_cols = [
+        c
+        for c in out.columns
+        if c not in {"scenario", "controller_method", "battery_duration", "profile_basis", "price_signal_used"}
+    ]
     out[numeric_cols] = out[numeric_cols].round(4)
     return out
 
 
 def run_rq3(
-    day_df: pd.DataFrame,
+    mean_horizon_df: pd.DataFrame,
     year_df: pd.DataFrame,
     battery_daily_stats: pd.DataFrame,
     year: int,
+    dt_hours: float,
     output_dir: Path,
 ) -> tuple[Path, Path, Path]:
-    characteristic_day = pd.Timestamp(day_df["date"].iloc[0])
-    window_df = get_forward_two_day_window(year_df, characteristic_day)
-
+    output_dir.mkdir(parents=True, exist_ok=True)
     fig2_10 = output_dir / "figure2_flex_bess_10_intermediate.png"
     fig2_25 = output_dir / "figure2_flex_bess_25_intermediate.png"
     summary = output_dir / "bess_summary_intermediate.csv"
@@ -294,8 +292,8 @@ def run_rq3(
     battery_energy_4h = _lookup_battery_energy(battery_daily_stats, year, "10%_flex + 4h-Battery")
     battery_energy_8h = _lookup_battery_energy(battery_daily_stats, year, "10%_flex + 8h-Battery")
 
-    _plot_figure2_two_day(
-        window_df=window_df,
+    _plot_figure2_mean_horizon(
+        horizon_df=mean_horizon_df,
         year=year,
         out_file=fig2_10,
         flex_col="load_flex_10",
@@ -310,8 +308,8 @@ def run_rq3(
         title="10% Flex",
         flex_label="10%",
     )
-    _plot_figure2_two_day(
-        window_df=window_df,
+    _plot_figure2_mean_horizon(
+        horizon_df=mean_horizon_df,
         year=year,
         out_file=fig2_25,
         flex_col="load_flex_25",
@@ -327,6 +325,6 @@ def run_rq3(
         flex_label="25%",
     )
 
-    make_bess_summary(year_df, battery_daily_stats, characteristic_day, year).to_csv(summary, index=False)
+    make_bess_summary(mean_horizon_df, year_df, battery_daily_stats, year, dt_hours=dt_hours).to_csv(summary, index=False)
 
     return fig2_10, fig2_25, summary

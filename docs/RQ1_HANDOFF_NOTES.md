@@ -10,7 +10,7 @@ This note explains:
 Command:
 
 ```bash
-python intermediate_report_exports.py --rq rq1 --year 2025
+python src/intermediate_report_exports.py --rq rq1 --year 2025
 ```
 
 Default filters from the runner:
@@ -27,7 +27,7 @@ Important:
 
 ## Data Source and Unit
 Input file:
-- `ukpn-data-centre-demand-profiles.csv`
+- `data/raw/ukpn-data-centre-demand-profiles.csv`
 
 Relevant columns used:
 - `anonymised_data_centre_name`
@@ -41,16 +41,16 @@ Time granularity:
 ## Core Preprocessing Logic
 1. Filter rows by voltage/DC type/centre/min-utilisation.
 2. Build aggregate half-hour timeseries by averaging utilisation across matched rows per timestamp.
-3. Determine characteristic peak day in 2025 from aggregate daily max.
-4. For RQ1 centre analysis, load centre-level rows for the whole year (not one day only).
+3. Build the annual mean-day profile for 2025 from all filtered centre-level rows.
+4. For RQ1 centre analysis, load centre-level rows for the whole year.
 
 ## Figure Outputs and Meaning
 
-## 1) `figure0_intro_typical_day_all_centres.png`
+## 1) `figure0_intro_annual_mean_day_all_centres.png`
 This is the main combined RQ1 dashboard (2x2 panels):
 
-Panel A: Characteristic day vs typical patterns
-- Characteristic peak day profile (2025) vs typical weekday mean vs typical weekend mean.
+Panel A: Annual mean-day vs weekday/weekend patterns
+- Annual mean-day profile (2025) vs weekday mean vs weekend mean.
 - Includes weekday p10-p90 band.
 - Purpose: shows the 08:00-18:00 style structure is not a one-day artifact.
 
@@ -60,7 +60,7 @@ Panel B: Cross-centre variability by hour
 
 Panel C: One-hour load jump distribution by hour
 - Boxplot of `|delta_1h|` by hour over all centres and all days.
-- `delta_1h = utilisation[t] - utilisation[t-2]` (because data is half-hourly).
+- `delta_1h` compares each centre against the value exactly one timestamp hour earlier.
 - Purpose: identifies time windows with stronger ramp/jump behavior.
 
 Panel D: Top 20 centres by one-hour jump count

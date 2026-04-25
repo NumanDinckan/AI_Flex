@@ -6,10 +6,10 @@ This repository is now split so 3 developers can work in parallel with minimal m
 
 - `rq1_figure0.py`
   - Owner: RQ1 developer
-  - Scope: Figure 0 (`figure0_intro_typical_day_all_centres.png`)
+  - Scope: Figure 0 (`figure0_intro_annual_mean_day_all_centres.png`)
 - `rq2_figure1.py`
   - Owner: RQ2 developer
-  - Scope: Figure 1 (`figure1_flex_intermediate.png`) and flexibility summary (`flexibility_summary_intermediate.csv`)
+  - Scope: Figure 1 set (`figure1_flex_intermediate*.png`) and flexibility summary (`flexibility_summary_intermediate.csv`)
 - `rq3_figure2.py`
   - Owner: RQ3 developer
   - Scope: Figure 2 outputs (`figure2_flex_bess_10_intermediate.png`, `figure2_flex_bess_25_intermediate.png`) and BESS summary (`bess_summary_intermediate.csv`)
