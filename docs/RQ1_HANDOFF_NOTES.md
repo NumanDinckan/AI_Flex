@@ -4,6 +4,8 @@
 
 What do publicly available data centre load profiles reveal about variability, peak concentration, and potential flexibility?
 
+For a more detailed graph-by-graph explanation, use `docs/RQ1_GRAPH_GUIDE.md`.
+
 RQ1 should now be answered with three linked ideas:
 
 - Variability: how much the profiles move within short time windows.
