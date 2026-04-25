@@ -50,7 +50,9 @@ python src/intermediate_report_exports.py --rq rq3 --year 2025 \
 If `data/raw/United Kingdom.csv` exists, it is used automatically. Without a price file, RQ3 remains peak-first and reports `price_signal_used = False`.
 
 ## Current Method
-RQ1 and RQ2 report full-year annual mean-day profiles, not single peak days. Flexibility is defined operationally:
+RQ1 uses the full-year centre-level profiles to answer variability, peak concentration, and potential flexibility. Figure 0 now combines the accepted one-hour load-jump view with an annual load-duration curve, peak-timing histogram, and peak-shaving opportunity curve.
+
+RQ2 reports full-year annual mean-day profiles, not single peak days. Flexibility is defined operationally:
 
 - `10%` flex: up to `10%` reduction for a maximum of `3` consecutive peak hours
 - `25%` flex: up to `25%` reduction for a maximum of `3` consecutive peak hours
