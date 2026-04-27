@@ -508,7 +508,7 @@ def main() -> None:
 
     if args.rq in {"all", "rq3"}:
         rq3_output_dir = get_rq_output_dir(context.output_dir, "rq3")
-        fig10, fig25, table = run_rq3(
+        fig10, fig25, table, scenario_table = run_rq3(
             mean_horizon_df=context.mean_48h_df,
             year_df=context.year_df,
             battery_daily_stats=context.battery_daily_stats,
@@ -516,7 +516,7 @@ def main() -> None:
             dt_hours=context.dt_hours,
             output_dir=rq3_output_dir,
         )
-        saved_files.extend([str(fig10.resolve()), str(fig25.resolve()), str(table.resolve())])
+        saved_files.extend([str(fig10.resolve()), str(fig25.resolve()), str(table.resolve()), str(scenario_table.resolve())])
 
     print(f"RQ selection: {args.rq}")
     print(f"Year selected: {context.year}")

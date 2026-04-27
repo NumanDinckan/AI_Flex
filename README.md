@@ -103,6 +103,7 @@ RQ3:
 - `rq3/figure2_flex_bess_10_intermediate.png`
 - `rq3/figure2_flex_bess_25_intermediate.png`
 - `rq3/bess_summary_intermediate.csv`
+- `rq3/scenario_comparison_table_2025.csv`
 
 ## Documentation
 
@@ -110,7 +111,8 @@ RQ3:
 - `docs/RQ1_GRAPH_GUIDE.md`: detailed Figure 0 and RQ1 graph explanation.
 - `docs/RQ1_HANDOFF_NOTES.md`: compact RQ1 handoff.
 - `docs/RQ2_METHOD_NOTES.md`: RQ2 flexibility method and Figure 1 interpretation.
-- `docs/RQ3_METHOD_NOTES.md`: RQ3 BESS method and Figure 2 interpretation.
+- `docs/RQ3_METHOD_NOTES.md`: RQ3 BESS method, Figure 2 interpretation, and compact scenario comparison table.
+- `docs/SCENARIO_COMPARISON_TABLE.md`: report-ready six-column table for flex and BESS scenarios.
 - `docs/PAPER_METHOD_COMPARISON.md`: comparison with the flexible data-centres whitepaper.
 - `docs/REPO_UPLOAD_CHECKLIST.md`: submission and repository hygiene checklist.
 - `docs/GITHUB_PARALLEL_WORKFLOW.md`: collaboration and run workflow.

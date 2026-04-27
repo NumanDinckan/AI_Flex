@@ -89,6 +89,7 @@ Report-ready files:
 - `rq3/figure2_flex_bess_10_intermediate.png`
 - `rq3/figure2_flex_bess_25_intermediate.png`
 - `rq3/bess_summary_intermediate.csv`
+- `rq3/scenario_comparison_table_2025.csv`
 
 The figures show annual mean 48-hour profiles for:
 
@@ -99,6 +100,27 @@ The figures show annual mean 48-hour profiles for:
 - battery net power
 - battery state of charge
 - UK electricity price on the right-hand axis when available
+
+## Scenario Comparison Table
+
+`rq3/scenario_comparison_table_2025.csv` is the compact table for final-report and presentation use. It intentionally stays at six columns:
+
+- `scenario`
+- `flex_case`
+- `bess_duration`
+- `residual_peak_utilisation`
+- `annual_peak_reduction_vs_original_percent`
+- `price_weighted_cost_reduction_vs_original_percent`
+
+These columns are defensible because data-centre demand-response studies commonly evaluate peak avoidance and electricity-cost savings, while behind-the-meter storage studies commonly evaluate peak-demand reduction. The table also includes the residual peak so the percentage reduction is anchored to the remaining utilisation level.
+
+The cost metric is a price-weighted import proxy:
+
+`sum(load * UK electricity price * dt_hours)`
+
+Because the project uses utilisation ratios rather than MW, this is not an absolute electricity bill. It excludes demand charges, standing charges, taxes, network tariffs, degradation, and investment cost. Use it only for relative comparison across scenarios under the same annual price series.
+
+A report-ready Markdown copy is available in `docs/SCENARIO_COMPARISON_TABLE.md`.
 
 ## Final Report Wording
 
@@ -125,7 +147,9 @@ Recommended slide:
 - Colangelo, P. et al. (2026), *AI data centres as grid-interactive assets*, *Nature Energy*. `https://doi.org/10.1038/s41560-025-01927-1`
 - DiOrio, N. (2017), *An Overview of the Automated Dispatch Controller Algorithms in the System Advisor Model (SAM)*. `https://www.nrel.gov/docs/fy18osti/68614.pdf`
 - Mirletz, B. T. and Guittet, D. L. (2021), *Heuristic Dispatch Based on Price Signals for Behind-the-Meter PV-Battery Systems in the System Advisor Model*. `https://www.nrel.gov/docs/fy21osti/80258.pdf`
+- McFadden, W. et al. (2016), *Saving on Data Center Energy Bills with EDEALS: Electricity Demand-response Easy Adjusted Load Shifting*. `https://www.usenix.org/conference/cooldc16/workshop-program/presentation/mcfadden`
 - Neubauer, J. and Simpson, M. (2015), *Deployment of Behind-The-Meter Energy Storage for Demand Charge Reduction*. `https://doi.org/10.2172/1168774`
+- Zhang, X. A. and Zavala, V. M. (2021), *Remunerating Space-Time, Load-Shifting Flexibility from Data Centers in Electricity Markets*. `https://arxiv.org/abs/2105.11416`
 
 ## Caveats
 

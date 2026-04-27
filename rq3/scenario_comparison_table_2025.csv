@@ -1,0 +1,7 @@
+scenario,flex_case,bess_duration,residual_peak_utilisation,annual_peak_reduction_vs_original_percent,price_weighted_cost_reduction_vs_original_percent
+10% Flex only,10%,No BESS,0.5643,0.0,0.0667
+25% Flex only,25%,No BESS,0.5643,0.0,0.0631
+10% Flex + 4h BESS,10%,4h,0.4239,24.8901,2.7884
+10% Flex + 8h BESS,10%,8h,0.4239,24.8919,3.3791
+25% Flex + 4h BESS,25%,4h,0.4239,24.8901,2.7891
+25% Flex + 8h BESS,25%,8h,0.4239,24.8919,3.3761

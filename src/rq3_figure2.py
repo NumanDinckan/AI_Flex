@@ -276,6 +276,63 @@ def make_bess_summary(
     return out
 
 
+def _price_weighted_cost_proxy(year_df: pd.DataFrame, load_col: str, dt_hours: float) -> float:
+    if "uk_price" not in year_df.columns or load_col not in year_df.columns:
+        return np.nan
+
+    load = pd.to_numeric(year_df[load_col], errors="coerce")
+    price = pd.to_numeric(year_df["uk_price"], errors="coerce")
+    valid = load.notna() & price.notna()
+    if not bool(valid.any()):
+        return np.nan
+
+    return float((load[valid] * price[valid]).sum() * dt_hours)
+
+
+def make_scenario_comparison_table(year_df: pd.DataFrame, dt_hours: float) -> pd.DataFrame:
+    original_peak = float(year_df["utilisation"].max())
+    original_cost = _price_weighted_cost_proxy(year_df, "utilisation", dt_hours)
+
+    scenarios = [
+        ("10% Flex only", "10%", "No BESS", "load_flex_10"),
+        ("25% Flex only", "25%", "No BESS", "load_flex_25"),
+        ("10% Flex + 4h BESS", "10%", "4h", "load_10_flex_4h_batt"),
+        ("10% Flex + 8h BESS", "10%", "8h", "load_10_flex_8h_batt"),
+        ("25% Flex + 4h BESS", "25%", "4h", "load_25_flex_4h_batt"),
+        ("25% Flex + 8h BESS", "25%", "8h", "load_25_flex_8h_batt"),
+    ]
+
+    rows: list[dict[str, object]] = []
+    for scenario, flex_case, bess_duration, load_col in scenarios:
+        residual_peak = float(year_df[load_col].max())
+        scenario_cost = _price_weighted_cost_proxy(year_df, load_col, dt_hours)
+        rows.append(
+            {
+                "scenario": scenario,
+                "flex_case": flex_case,
+                "bess_duration": bess_duration,
+                "residual_peak_utilisation": residual_peak,
+                "annual_peak_reduction_vs_original_percent": (
+                    (original_peak - residual_peak) / original_peak * 100.0 if original_peak > 0 else np.nan
+                ),
+                "price_weighted_cost_reduction_vs_original_percent": (
+                    (original_cost - scenario_cost) / original_cost * 100.0
+                    if np.isfinite(original_cost) and np.isfinite(scenario_cost) and original_cost != 0
+                    else np.nan
+                ),
+            }
+        )
+
+    out = pd.DataFrame(rows)
+    numeric_cols = [
+        "residual_peak_utilisation",
+        "annual_peak_reduction_vs_original_percent",
+        "price_weighted_cost_reduction_vs_original_percent",
+    ]
+    out[numeric_cols] = out[numeric_cols].round(4)
+    return out
+
+
 def run_rq3(
     mean_horizon_df: pd.DataFrame,
     year_df: pd.DataFrame,
@@ -283,11 +340,12 @@ def run_rq3(
     year: int,
     dt_hours: float,
     output_dir: Path,
-) -> tuple[Path, Path, Path]:
+) -> tuple[Path, Path, Path, Path]:
     output_dir.mkdir(parents=True, exist_ok=True)
     fig2_10 = output_dir / "figure2_flex_bess_10_intermediate.png"
     fig2_25 = output_dir / "figure2_flex_bess_25_intermediate.png"
     summary = output_dir / "bess_summary_intermediate.csv"
+    scenario_table = output_dir / f"scenario_comparison_table_{year}.csv"
 
     battery_energy_4h = _lookup_battery_energy(battery_daily_stats, year, "10%_flex + 4h-Battery")
     battery_energy_8h = _lookup_battery_energy(battery_daily_stats, year, "10%_flex + 8h-Battery")
@@ -326,5 +384,6 @@ def run_rq3(
     )
 
     make_bess_summary(mean_horizon_df, year_df, battery_daily_stats, year, dt_hours=dt_hours).to_csv(summary, index=False)
+    make_scenario_comparison_table(year_df, dt_hours=dt_hours).to_csv(scenario_table, index=False)
 
-    return fig2_10, fig2_25, summary
+    return fig2_10, fig2_25, summary, scenario_table
