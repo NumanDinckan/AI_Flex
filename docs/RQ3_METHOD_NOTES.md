@@ -31,16 +31,24 @@ The model evaluates four cases:
 - `25% Flex + 4h BESS`
 - `25% Flex + 8h BESS`
 
-Battery power is set as:
+Battery power is scenario-specific:
 
-`battery_power = 0.25 * annual_peak_utilisation`
+- `10%` BESS cases use `battery_power = 0.10 * annual_peak_utilisation`
+- `25%` BESS cases use `battery_power = 0.25 * annual_peak_utilisation`
 
 Battery energy is:
 
 - `4h battery_energy = battery_power * 4`
 - `8h battery_energy = battery_power * 8`
 
-The `4h` and `8h` labels refer to battery energy duration. They are separate from the RQ2 maximum flexibility duration of 3 peak hours.
+The `4h` and `8h` labels refer to battery energy duration. They are separate from the RQ2 daily flexibility budgets of `2.5` and `4.0` peak-equivalent hours.
+
+The `25%` BESS cases are also allowed a more aggressive operating envelope than the `10%` cases:
+
+- `10%` cases use a `10%-90%` usable SoC band and keep the terminal target at the carried current SoC
+- `25%` cases use a `5%-95%` usable SoC band and target a lower terminal reserve of `35%` of battery energy
+
+This setup is intentional: the exploratory `25%` flex case is meant to test whether deeper operational flexibility can be paired with a stronger behind-the-meter storage response.
 
 ## Dispatch Objective
 
@@ -74,13 +82,22 @@ The annual peak fields are the main quantitative result fields. The mean-horizon
 
 From `rq3/bess_summary_intermediate.csv`:
 
-- Original annual peak: `0.5643`.
-- Residual annual peak after RQ2 flexibility: `0.5643`.
-- Residual annual peak after BESS: about `0.4239`.
-- Annual peak reduction versus original: about `24.89%` for all four BESS cases.
+- Original annual peak: `0.3684`.
+- Residual annual peak after RQ2 flexibility: `0.3616` in both the `10%` and `25%` flex cases on this branch.
+- Residual annual peak after BESS ranges from about `0.3454` to `0.3397` across the four BESS cases.
+- Annual peak reduction versus original ranges from about `6.25%` to `7.78%`.
 - `price_signal_used = True`, because the UK price CSV was available.
 
-The `4h` and `8h` BESS cases produce very similar annual peak reductions in the current summary. The main difference is in annual charge/discharge energy, equivalent cycles, and price-aware dispatch behavior.
+The strongest case on this branch is `25% Flex + 8h BESS` at `0.3397`, equivalent to about `7.78%` annual peak reduction versus original. The `25%` BESS cases now outperform the matching `10%` cases not only because of longer energy duration, but also because they are allowed a larger battery power fraction and a looser SoC reserve policy.
+
+## Inherited RQ2 Limitations
+
+RQ3 inherits the structure of the RQ2 flex-adjusted load that it dispatches on top of. On this branch, the RQ2 step uses the narrower `11:00-19:00` source window and fixed `22:00-06:00` recovery window. Two important limitations remain:
+
+- overnight recovery is still constrained to the fixed `22:00-06:00` window
+- recovery is deterministic and does not model endogenous queue or rebound dynamics
+
+In other words, RQ3 does not remove the remaining RQ2 simplifications. It evaluates BESS on top of them.
 
 ## Figure 2 Outputs
 
@@ -128,9 +145,13 @@ Use:
 
 > RQ3 models a co-located BESS as a behind-the-meter asset operating on the RQ2 flex-adjusted data-centre load. Dispatch is solved over a 48-hour receding horizon at half-hour resolution. The objective minimizes residual peaks first and uses UK electricity price as a secondary dispatch signal when price data is available.
 
+Also use:
+
+> The battery is not sized identically across all scenarios. The `10%` BESS cases use battery power equal to `10%` of the annual peak utilisation, while the `25%` BESS cases use `25%`. The exploratory `25%` cases also operate with a wider usable SoC band (`5%-95%`) and a lower terminal reserve target (`35%` of battery energy), allowing them to respond more aggressively to peak events.
+
 For the result:
 
-> In the 2025 utilisation profile, RQ2 flexibility alone does not reduce the absolute annual peak, but adding BESS reduces the residual annual peak from `0.5643` to about `0.4239`, a reduction of about `24.9%`.
+> In the 2025 utilisation profile generated on this branch, RQ2 flexibility alone delivers only a modest peak change, but adding BESS reduces the annual peak from `0.3684` to between about `0.3454` and `0.3397`, equivalent to about `6.25%` to `7.78%` peak reduction depending on the scenario. The best case is `25% Flex + 8h BESS`.
 
 ## Presentation Use
 
@@ -150,10 +171,14 @@ Recommended slide:
 - McFadden, W. et al. (2016), *Saving on Data Center Energy Bills with EDEALS: Electricity Demand-response Easy Adjusted Load Shifting*. `https://www.usenix.org/conference/cooldc16/workshop-program/presentation/mcfadden`
 - Neubauer, J. and Simpson, M. (2015), *Deployment of Behind-The-Meter Energy Storage for Demand Charge Reduction*. `https://doi.org/10.2172/1168774`
 - Zhang, X. A. and Zavala, V. M. (2021), *Remunerating Space-Time, Load-Shifting Flexibility from Data Centers in Electricity Markets*. `https://arxiv.org/abs/2105.11416`
+- Norris, T. H., Profeta, T., Patiño-Echeverri, D., and Cowie-Haskell, A. (2025), *Rethinking Load Growth: Assessing the Potential for Integration of Large Flexible Loads in US Power Systems*. `https://nicholasinstitute.duke.edu/publications/rethinking-load-growth`
+- IEA (2025), *Energy and AI*. `https://www.iea.org/reports/energy-and-ai`
+- Wang, Y., Guo, Q., and Chen, M. (2025), *Providing load flexibility by reshaping power profiles of large language model workloads*. `https://doi.org/10.1016/j.adapen.2025.100232`
+- Chen, X., Wang, X., Colacelli, A., Lee, M., and Xie, L. (2025), *Electricity Demand and Grid Impacts of AI Data Centers: Challenges and Prospects*. `https://doi.org/10.48550/arXiv.2509.07218`
 
 ## Caveats
 
 - Results are in utilisation ratios, not MW.
-- Battery sizing is fixed by scenario, not optimized economically.
+- Battery sizing and SoC policy are fixed by scenario, not optimized economically.
 - The model does not include degradation cost, full tariff structure, standing charges, or investment cost.
 - The mean 48-hour figure is a reporting view; annual peak metrics remain the primary result.

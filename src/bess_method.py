@@ -18,6 +18,10 @@ class BessScenario:
     scenario: str
     battery_duration: str
     duration_hours: float
+    battery_power_fraction: float
+    soc_min_fraction: float
+    soc_max_fraction: float
+    terminal_soc_fraction: float | None
     flex_col: str
     load_col: str
     soc_col: str
@@ -31,6 +35,10 @@ BESS_SCENARIOS: tuple[BessScenario, ...] = (
         scenario="10%_flex + 4h-Battery",
         battery_duration="4h",
         duration_hours=4.0,
+        battery_power_fraction=0.10,
+        soc_min_fraction=SOC_MIN_FRACTION,
+        soc_max_fraction=SOC_MAX_FRACTION,
+        terminal_soc_fraction=None,
         flex_col="load_flex_10",
         load_col="load_10_flex_4h_batt",
         soc_col="soc_10_flex_4h_batt",
@@ -42,6 +50,10 @@ BESS_SCENARIOS: tuple[BessScenario, ...] = (
         scenario="10%_flex + 8h-Battery",
         battery_duration="8h",
         duration_hours=8.0,
+        battery_power_fraction=0.10,
+        soc_min_fraction=SOC_MIN_FRACTION,
+        soc_max_fraction=SOC_MAX_FRACTION,
+        terminal_soc_fraction=None,
         flex_col="load_flex_10",
         load_col="load_10_flex_8h_batt",
         soc_col="soc_10_flex_8h_batt",
@@ -53,6 +65,10 @@ BESS_SCENARIOS: tuple[BessScenario, ...] = (
         scenario="25%_flex + 4h-Battery",
         battery_duration="4h",
         duration_hours=4.0,
+        battery_power_fraction=0.25,
+        soc_min_fraction=0.05,
+        soc_max_fraction=0.95,
+        terminal_soc_fraction=0.35,
         flex_col="load_flex_25",
         load_col="load_25_flex_4h_batt",
         soc_col="soc_25_flex_4h_batt",
@@ -64,6 +80,10 @@ BESS_SCENARIOS: tuple[BessScenario, ...] = (
         scenario="25%_flex + 8h-Battery",
         battery_duration="8h",
         duration_hours=8.0,
+        battery_power_fraction=0.25,
+        soc_min_fraction=0.05,
+        soc_max_fraction=0.95,
+        terminal_soc_fraction=0.35,
         flex_col="load_flex_25",
         load_col="load_25_flex_8h_batt",
         soc_col="soc_25_flex_8h_batt",
@@ -74,9 +94,14 @@ BESS_SCENARIOS: tuple[BessScenario, ...] = (
 )
 
 
-def _clip_soc(value: float, battery_energy: float) -> float:
-    soc_min = SOC_MIN_FRACTION * battery_energy
-    soc_max = SOC_MAX_FRACTION * battery_energy
+def _clip_soc(
+    value: float,
+    battery_energy: float,
+    soc_min_fraction: float = SOC_MIN_FRACTION,
+    soc_max_fraction: float = SOC_MAX_FRACTION,
+) -> float:
+    soc_min = soc_min_fraction * battery_energy
+    soc_max = soc_max_fraction * battery_energy
     return float(np.clip(value, soc_min, soc_max))
 
 
@@ -88,6 +113,8 @@ def simulate_peak_cap_dispatch(
     initial_soc: float,
     terminal_soc_target: float,
     step_h: float,
+    soc_min_fraction: float = SOC_MIN_FRACTION,
+    soc_max_fraction: float = SOC_MAX_FRACTION,
     round_trip_eff: float = ROUND_TRIP_EFFICIENCY,
 ) -> dict[str, np.ndarray | float | bool]:
     base_load = np.asarray(load, dtype=float)
@@ -116,10 +143,15 @@ def simulate_peak_cap_dispatch(
         }
 
     eta = float(np.sqrt(round_trip_eff))
-    soc_min = SOC_MIN_FRACTION * battery_energy
-    soc_max = SOC_MAX_FRACTION * battery_energy
-    soc = _clip_soc(initial_soc, battery_energy)
-    terminal_target = _clip_soc(terminal_soc_target, battery_energy)
+    soc_min = soc_min_fraction * battery_energy
+    soc_max = soc_max_fraction * battery_energy
+    soc = _clip_soc(initial_soc, battery_energy, soc_min_fraction=soc_min_fraction, soc_max_fraction=soc_max_fraction)
+    terminal_target = _clip_soc(
+        terminal_soc_target,
+        battery_energy,
+        soc_min_fraction=soc_min_fraction,
+        soc_max_fraction=soc_max_fraction,
+    )
 
     for i, base in enumerate(base_load):
         discharge_needed = max(base - target_power, 0.0)
@@ -170,6 +202,8 @@ def find_optimal_peak_target(
     initial_soc: float,
     terminal_soc_target: float,
     step_h: float,
+    soc_min_fraction: float = SOC_MIN_FRACTION,
+    soc_max_fraction: float = SOC_MAX_FRACTION,
     round_trip_eff: float = ROUND_TRIP_EFFICIENCY,
     tol: float = 1e-4,
 ) -> dict[str, np.ndarray | float | bool]:
@@ -183,6 +217,8 @@ def find_optimal_peak_target(
             initial_soc=initial_soc,
             terminal_soc_target=terminal_soc_target,
             step_h=step_h,
+            soc_min_fraction=soc_min_fraction,
+            soc_max_fraction=soc_max_fraction,
             round_trip_eff=round_trip_eff,
         )
 
@@ -197,6 +233,8 @@ def find_optimal_peak_target(
         initial_soc=initial_soc,
         terminal_soc_target=terminal_soc_target,
         step_h=step_h,
+        soc_min_fraction=soc_min_fraction,
+        soc_max_fraction=soc_max_fraction,
         round_trip_eff=round_trip_eff,
     )
 
@@ -212,6 +250,8 @@ def find_optimal_peak_target(
             initial_soc=initial_soc,
             terminal_soc_target=terminal_soc_target,
             step_h=step_h,
+            soc_min_fraction=soc_min_fraction,
+            soc_max_fraction=soc_max_fraction,
             round_trip_eff=round_trip_eff,
         )
         if bool(candidate["feasible"]):
@@ -232,6 +272,8 @@ def solve_peak_cap_dispatch_lp(
     historical_peak: float,
     step_h: float,
     price: np.ndarray | None = None,
+    soc_min_fraction: float = SOC_MIN_FRACTION,
+    soc_max_fraction: float = SOC_MAX_FRACTION,
     round_trip_eff: float = ROUND_TRIP_EFFICIENCY,
     peak_tol: float = 1e-5,
     slack_tol: float = 1e-6,
@@ -259,14 +301,26 @@ def solve_peak_cap_dispatch_lp(
             initial_soc=initial_soc,
             terminal_soc_target=terminal_soc_target,
             step_h=step_h,
+            soc_min_fraction=soc_min_fraction,
+            soc_max_fraction=soc_max_fraction,
             round_trip_eff=round_trip_eff,
         )
 
     eta = float(np.sqrt(round_trip_eff))
-    soc_min = SOC_MIN_FRACTION * battery_energy
-    soc_max = SOC_MAX_FRACTION * battery_energy
-    initial_soc = _clip_soc(initial_soc, battery_energy)
-    terminal_soc_target = _clip_soc(terminal_soc_target, battery_energy)
+    soc_min = soc_min_fraction * battery_energy
+    soc_max = soc_max_fraction * battery_energy
+    initial_soc = _clip_soc(
+        initial_soc,
+        battery_energy,
+        soc_min_fraction=soc_min_fraction,
+        soc_max_fraction=soc_max_fraction,
+    )
+    terminal_soc_target = _clip_soc(
+        terminal_soc_target,
+        battery_energy,
+        soc_min_fraction=soc_min_fraction,
+        soc_max_fraction=soc_max_fraction,
+    )
 
     idx_m = 0
     idx_c = 1
@@ -444,13 +498,13 @@ def simulate_bess(
 
     for year, gy in out.groupby("year", sort=True):
         year_peak = float(gy["utilisation"].max())
-        battery_power = 0.25 * year_peak
 
         day_groups = [(pd.Timestamp(date), day_df.index.to_numpy()) for date, day_df in gy.groupby("date", sort=True)]
         index_by_date = {date: idx for date, idx in day_groups}
         dates = [date for date, _ in day_groups]
 
         for scenario in BESS_SCENARIOS:
+            battery_power = scenario.battery_power_fraction * year_peak
             battery_energy = battery_power * scenario.duration_hours
             current_soc = 0.5 * battery_energy
             historical_peak = 0.0
@@ -466,16 +520,23 @@ def simulate_bess(
                 used_fallback = False
                 terminal_slack = 0.0
                 historical_peak_before_dispatch = float(historical_peak)
+                terminal_soc_target = (
+                    scenario.terminal_soc_fraction * battery_energy
+                    if scenario.terminal_soc_fraction is not None
+                    else current_soc
+                )
                 try:
                     dispatch = solve_peak_cap_dispatch_lp(
                         load=horizon_load,
                         battery_power=battery_power,
                         battery_energy=battery_energy,
                         initial_soc=current_soc,
-                        terminal_soc_target=current_soc,
+                        terminal_soc_target=terminal_soc_target,
                         historical_peak=historical_peak,
                         step_h=step_h,
                         price=horizon_price,
+                        soc_min_fraction=scenario.soc_min_fraction,
+                        soc_max_fraction=scenario.soc_max_fraction,
                     )
                     terminal_slack = float(dispatch.get("terminal_slack", 0.0))
                 except RuntimeError:
@@ -486,8 +547,10 @@ def simulate_bess(
                         battery_power=battery_power,
                         battery_energy=battery_energy,
                         initial_soc=current_soc,
-                        terminal_soc_target=current_soc,
+                        terminal_soc_target=terminal_soc_target,
                         step_h=step_h,
+                        soc_min_fraction=scenario.soc_min_fraction,
+                        soc_max_fraction=scenario.soc_max_fraction,
                     )
                     controller_method = "rolling_48h_peak_cap_price_fallback" if has_price else "rolling_48h_peak_cap_fallback"
                     used_fallback = True
@@ -530,7 +593,7 @@ def simulate_bess(
                         "battery_energy": battery_energy,
                         "historical_peak_before_dispatch": historical_peak_before_dispatch,
                         "initial_soc": float(current_soc),
-                        "terminal_soc_target": float(current_soc),
+                        "terminal_soc_target": float(terminal_soc_target),
                         "final_soc": final_soc,
                         "min_soc": float(exec_soc.min()) if exec_soc.size else float(current_soc),
                         "max_soc": float(exec_soc.max()) if exec_soc.size else float(current_soc),
@@ -555,3 +618,4 @@ def simulate_bess(
                 current_soc = final_soc
 
     return out, pd.DataFrame(battery_rows)
+

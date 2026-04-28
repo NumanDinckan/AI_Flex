@@ -4,6 +4,7 @@ from dataclasses import dataclass
 
 import numpy as np
 import pandas as pd
+from scipy.optimize import linprog
 
 
 @dataclass(frozen=True)
@@ -18,37 +19,66 @@ class FlexScenario:
     exploratory: bool = False
 
 
-FLEX_EVENT_START_HOUR = 14.0
-FLEX_EVENT_END_HOUR = 22.0
 DEFAULT_RECIPIENT_WINDOW_START_HOUR = 22.0
-DEFAULT_RECIPIENT_WINDOW_END_HOUR = 2.0
+DEFAULT_RECIPIENT_WINDOW_END_HOUR = 6.0
+CONSERVATIVE_FLEX_BUDGET_HOURS = 2.5
+EXPLORATORY_FLEX_BUDGET_HOURS = 4.0
+PEAK_TOL = 1e-6
 
 FLEX_SCENARIOS: tuple[FlexScenario, ...] = (
     FlexScenario(
         key="10",
         name="Conservative Flex 10%",
         flex_share=0.10,
-        max_peak_hours=3.0,
+        max_peak_hours=CONSERVATIVE_FLEX_BUDGET_HOURS,
         recipient_window_start_hour=DEFAULT_RECIPIENT_WINDOW_START_HOUR,
         recipient_window_end_hour=DEFAULT_RECIPIENT_WINDOW_END_HOUR,
-        framing="10% load reduction for up to 3 consecutive peak hours",
+        framing="10% load reduction co-optimized across up to 2.5 peak-equivalent hours per day",
     ),
     FlexScenario(
         key="25",
         name="Exploratory Flex 25%",
         flex_share=0.25,
-        max_peak_hours=3.0,
+        max_peak_hours=EXPLORATORY_FLEX_BUDGET_HOURS,
         recipient_window_start_hour=DEFAULT_RECIPIENT_WINDOW_START_HOUR,
         recipient_window_end_hour=DEFAULT_RECIPIENT_WINDOW_END_HOUR,
-        framing="25% load reduction for up to 3 consecutive peak hours",
+        framing="25% load reduction co-optimized across up to 4.0 peak-equivalent hours per day",
         exploratory=True,
     ),
 )
 
 
-def is_event_eligible(timestamp: pd.Timestamp) -> bool:
-    hour = timestamp.hour + timestamp.minute / 60.0
-    return timestamp.weekday() < 5 and FLEX_EVENT_START_HOUR <= hour < FLEX_EVENT_END_HOUR
+def _recovery_slot_upper_bound(
+    rec_idx: int,
+    scenario: FlexScenario,
+    base_load: np.ndarray,
+    load_total: np.ndarray,
+) -> float:
+    # Recovery headroom scales directly with the flex magnitude. A scenario that can
+    # reduce more deeply is also assumed to be able to absorb a proportionally larger
+    # overnight recovery pulse in the same slot.
+    recovery_upper = min((1.0 + scenario.flex_share) * base_load[rec_idx], 1.0)
+    return max(0.0, recovery_upper - load_total[rec_idx])
+
+
+def _hour_of_day(timestamp: pd.Timestamp) -> float:
+    return timestamp.hour + timestamp.minute / 60.0
+
+
+def _is_early_recovery_period(timestamp: pd.Timestamp, scenario: FlexScenario) -> bool:
+    hour = _hour_of_day(timestamp)
+    if scenario.recipient_window_end_hour <= scenario.recipient_window_start_hour:
+        return hour < scenario.recipient_window_end_hour
+    return False
+
+
+def is_event_eligible(timestamp: pd.Timestamp, scenario: FlexScenario) -> bool:
+    # Restrict source reductions to a narrower daytime peak window so the event starts
+    # earlier than the late-afternoon-only case but does not smear across the full day.
+    if _is_early_recovery_period(timestamp, scenario):
+        return False
+    hour = _hour_of_day(timestamp)
+    return 11.0 <= hour < 19.0
 
 
 def _recipient_window_label(scenario: FlexScenario) -> str:
@@ -65,49 +95,6 @@ def _recipient_window_bounds(date: pd.Timestamp, scenario: FlexScenario) -> tupl
     return start, end
 
 
-def _select_peak_block(
-    work: pd.DataFrame,
-    day_idx: np.ndarray,
-    available_shift: np.ndarray,
-    base_load: np.ndarray,
-    dt_hours: float,
-    scenario: FlexScenario,
-) -> np.ndarray:
-    event_idx = [
-        int(i)
-        for i in day_idx
-        if is_event_eligible(pd.Timestamp(work.loc[i, "timestamp"]))
-    ]
-    if not event_idx:
-        return np.asarray([], dtype=int)
-
-    max_steps = max(1, int(round(scenario.max_peak_hours / dt_hours)))
-    expected_delta = pd.Timedelta(hours=dt_hours)
-    best_block: list[int] = []
-    best_score = (-np.inf, -np.inf)
-
-    for start_pos in range(len(event_idx)):
-        block = [event_idx[start_pos]]
-        for next_pos in range(start_pos + 1, len(event_idx)):
-            if len(block) >= max_steps:
-                break
-            prev_ts = pd.Timestamp(work.loc[block[-1], "timestamp"])
-            next_idx = event_idx[next_pos]
-            next_ts = pd.Timestamp(work.loc[next_idx, "timestamp"])
-            if next_ts - prev_ts != expected_delta:
-                break
-            block.append(next_idx)
-
-        shifted_score = float(available_shift[block].sum())
-        load_score = float(base_load[block].sum())
-        if (shifted_score, load_score) > best_score:
-            best_score = (shifted_score, load_score)
-            best_block = block
-
-    selected = [i for i in best_block if available_shift[i] > 1e-12]
-    return np.asarray(selected, dtype=int)
-
-
 def _recipient_candidates_for_day(
     work: pd.DataFrame,
     source_date: pd.Timestamp,
@@ -116,6 +103,215 @@ def _recipient_candidates_for_day(
     start, end = _recipient_window_bounds(source_date, scenario)
     mask = (work["timestamp"] >= start) & (work["timestamp"] < end)
     return [int(i) for i in work.index[mask]]
+
+
+def _source_candidates_for_day(
+    work: pd.DataFrame,
+    day_idx: np.ndarray,
+    available_shift: np.ndarray,
+    scenario: FlexScenario,
+) -> list[int]:
+    return [
+        int(i)
+        for i in day_idx
+        if available_shift[i] > 1e-12 and is_event_eligible(pd.Timestamp(work.loc[i, "timestamp"]), scenario)
+    ]
+
+
+def _build_day_pair_problem(
+    work: pd.DataFrame,
+    source_idx: list[int],
+    recipient_idx: list[int],
+    scenario: FlexScenario,
+    base_load: np.ndarray,
+    reference_load: np.ndarray,
+    load_total: np.ndarray,
+    original_annual_peak: float,
+    dt_hours: float,
+) -> tuple[list[tuple[int, int]], np.ndarray, np.ndarray, dict[int, list[int]], dict[int, list[int]], float]:
+    day_peak = float(np.max(base_load[source_idx])) if source_idx else 0.0
+    budget = float(scenario.flex_share * day_peak * scenario.max_peak_hours / dt_hours) if dt_hours > 0 else 0.0
+
+    pairs: list[tuple[int, int]] = []
+    delay_hours: list[float] = []
+    source_priority: list[float] = []
+    pairs_by_source: dict[int, list[int]] = {idx: [] for idx in source_idx}
+    pairs_by_recipient: dict[int, list[int]] = {idx: [] for idx in recipient_idx}
+
+    peak_ref = max(day_peak, 1e-9)
+    price_series = pd.to_numeric(work["uk_price"], errors="coerce") if "uk_price" in work.columns else None
+    max_price = float(np.nanmax(price_series.to_numpy(dtype=float))) if price_series is not None else 1.0
+    if not np.isfinite(max_price):
+        max_price = 1.0
+    max_price = max(max_price, 1e-9)
+
+    for src_idx in source_idx:
+        src_ts = pd.Timestamp(work.loc[src_idx, "timestamp"])
+        surplus = max(0.0, base_load[src_idx] - reference_load[src_idx])
+        if scenario.exploratory and price_series is not None:
+            # The exploratory 25% case is price-responsive: it prioritizes higher-price
+            # source intervals while still favoring load that sits above the reference profile.
+            src_price = float(price_series.loc[src_idx])
+            if np.isfinite(src_price):
+                price_norm = src_price / max_price
+                priority = 1.0 + price_norm + (surplus / peak_ref)
+            else:
+                priority = 1.0 + (base_load[src_idx] / peak_ref) + (surplus / peak_ref)
+        else:
+            # The conservative 10% case remains load-magnitude driven.
+            priority = 1.0 + (base_load[src_idx] / peak_ref) + (surplus / peak_ref)
+        for rec_idx in recipient_idx:
+            rec_ts = pd.Timestamp(work.loc[rec_idx, "timestamp"])
+            if rec_ts <= src_ts:
+                continue
+            pair_pos = len(pairs)
+            pairs.append((src_idx, rec_idx))
+            delay_hours.append((rec_ts - src_ts).total_seconds() / 3600.0)
+            source_priority.append(priority)
+            pairs_by_source[src_idx].append(pair_pos)
+            pairs_by_recipient[rec_idx].append(pair_pos)
+
+    return (
+        pairs,
+        np.asarray(delay_hours, dtype=float),
+        np.asarray(source_priority, dtype=float),
+        pairs_by_source,
+        pairs_by_recipient,
+        budget,
+    )
+
+
+def _solve_daily_shift_lp(
+    work: pd.DataFrame,
+    source_idx: list[int],
+    recipient_idx: list[int],
+    available_shift: np.ndarray,
+    base_load: np.ndarray,
+    reference_load: np.ndarray,
+    load_total: np.ndarray,
+    original_annual_peak: float,
+    dt_hours: float,
+    scenario: FlexScenario,
+) -> tuple[np.ndarray, np.ndarray, float, float, float]:
+    outgoing = np.zeros(len(load_total), dtype=float)
+    incoming = np.zeros(len(load_total), dtype=float)
+
+    if not source_idx or not recipient_idx:
+        return outgoing, incoming, 0.0, 0.0, 0.0
+
+    (
+        pairs,
+        delay_hours,
+        source_priority,
+        pairs_by_source,
+        pairs_by_recipient,
+        budget,
+    ) = _build_day_pair_problem(
+        work=work,
+        source_idx=source_idx,
+        recipient_idx=recipient_idx,
+        scenario=scenario,
+        base_load=base_load,
+        reference_load=reference_load,
+        load_total=load_total,
+        original_annual_peak=original_annual_peak,
+        dt_hours=dt_hours,
+    )
+
+    if not pairs or budget <= 1e-12:
+        return outgoing, incoming, budget, 0.0, 0.0
+
+    n_pairs = len(pairs)
+    var_count = 1 + n_pairs
+    idx_m = 0
+    peak_upper = float(max(np.max(base_load[source_idx]), np.max(load_total[recipient_idx]), 0.0))
+
+    bounds: list[tuple[float | None, float | None]] = [(0.0, peak_upper)]
+    bounds.extend([(0.0, None)] * n_pairs)
+
+    a_ub_rows: list[np.ndarray] = []
+    b_ub_rows: list[float] = []
+
+    for src_idx in source_idx:
+        row = np.zeros(var_count, dtype=float)
+        for pair_pos in pairs_by_source.get(src_idx, []):
+            row[1 + pair_pos] = 1.0
+        a_ub_rows.append(row)
+        b_ub_rows.append(float(available_shift[src_idx]))
+
+    recipient_capacity = {}
+    for rec_idx in recipient_idx:
+        recipient_capacity[rec_idx] = _recovery_slot_upper_bound(
+            rec_idx=rec_idx,
+            scenario=scenario,
+            base_load=base_load,
+            load_total=load_total,
+        )
+        row = np.zeros(var_count, dtype=float)
+        for pair_pos in pairs_by_recipient.get(rec_idx, []):
+            row[1 + pair_pos] = 1.0
+        a_ub_rows.append(row)
+        b_ub_rows.append(float(recipient_capacity[rec_idx]))
+
+    budget_row = np.zeros(var_count, dtype=float)
+    budget_row[1:] = 1.0
+    a_ub_rows.append(budget_row)
+    b_ub_rows.append(float(budget))
+
+    affected_idx = sorted(set(source_idx) | set(recipient_idx))
+    for slot_idx in affected_idx:
+        row = np.zeros(var_count, dtype=float)
+        row[idx_m] = -1.0
+        for pair_pos, (src_idx, rec_idx) in enumerate(pairs):
+            if rec_idx == slot_idx:
+                row[1 + pair_pos] += 1.0
+            if src_idx == slot_idx:
+                row[1 + pair_pos] -= 1.0
+        a_ub_rows.append(row)
+        b_ub_rows.append(-float(load_total[slot_idx]))
+
+    a_ub = np.vstack(a_ub_rows)
+    b_ub = np.asarray(b_ub_rows, dtype=float)
+
+    peak_stage = linprog(
+        c=np.r_[1.0, np.zeros(n_pairs, dtype=float)],
+        A_ub=a_ub,
+        b_ub=b_ub,
+        bounds=bounds,
+        method="highs",
+    )
+    if not peak_stage.success:
+        return outgoing, incoming, budget, 0.0, 0.0
+
+    peak_cap = float(peak_stage.x[idx_m])
+    peak_limit_row = np.zeros(var_count, dtype=float)
+    peak_limit_row[idx_m] = 1.0
+    a_ub_stage2 = np.vstack([a_ub, peak_limit_row])
+    b_ub_stage2 = np.r_[b_ub, peak_cap + PEAK_TOL]
+
+    delay_penalty = delay_hours / max(24.0, float(np.max(delay_hours)) if delay_hours.size else 24.0)
+    c_stage2 = np.r_[0.0, -(source_priority) + 0.01 * delay_penalty]
+    allocation_stage = linprog(
+        c=c_stage2,
+        A_ub=a_ub_stage2,
+        b_ub=b_ub_stage2,
+        bounds=bounds,
+        method="highs",
+    )
+    if not allocation_stage.success:
+        return outgoing, incoming, budget, peak_cap, 0.0
+
+    pair_values = allocation_stage.x[1:]
+    delay_weighted_sum = 0.0
+    for pair_pos, value in enumerate(pair_values):
+        if value <= 1e-12:
+            continue
+        src_idx, rec_idx = pairs[pair_pos]
+        outgoing[src_idx] += float(value)
+        incoming[rec_idx] += float(value)
+        delay_weighted_sum += float(value) * float(delay_hours[pair_pos])
+
+    return outgoing, incoming, budget, peak_cap, delay_weighted_sum
 
 
 def apply_shiftable_flex_for_scenario(
@@ -147,83 +343,49 @@ def apply_shiftable_flex_for_scenario(
 
     for date, day_frame in work.groupby(work["timestamp"].dt.floor("D"), sort=True):
         day_idx = day_frame.index.to_numpy(dtype=int)
-        event_candidates = [
-            i
-            for i in day_idx
-            if is_event_eligible(pd.Timestamp(work.loc[i, "timestamp"]))
-        ]
-        selected = _select_peak_block(
+        source_candidates = _source_candidates_for_day(
             work=work,
             day_idx=day_idx,
             available_shift=available_shift,
-            base_load=base_load,
-            dt_hours=dt_hours,
             scenario=scenario,
         )
-        shiftable_target = float(available_shift[selected].sum()) if selected.size else 0.0
-        realized = 0.0
-        delay_weighted_sum = 0.0
-        saturated_recovery_slots: set[int] = set()
-        no_recovery_slots = 0
-
         recipient_candidates = _recipient_candidates_for_day(
             work=work,
             source_date=pd.Timestamp(date),
             scenario=scenario,
         )
+        outgoing, incoming, shiftable_target, optimized_peak, delay_weighted_sum = _solve_daily_shift_lp(
+            work=work,
+            source_idx=source_candidates,
+            recipient_idx=recipient_candidates,
+            available_shift=available_shift,
+            base_load=base_load,
+            reference_load=reference_load,
+            load_total=load_total,
+            original_annual_peak=original_annual_peak,
+            dt_hours=dt_hours,
+            scenario=scenario,
+        )
 
-        for peak_idx in selected:
-            amount = float(available_shift[peak_idx])
-            remaining = amount
-            if remaining <= 1e-12:
-                continue
+        active_sources = [idx for idx in source_candidates if outgoing[idx] > 1e-12]
+        if active_sources:
+            event_selected[active_sources] = 1.0
 
-            recovery_candidates = []
-            for rec_idx in recipient_candidates:
-                if rec_idx == peak_idx:
-                    continue
-                recovery_candidates.append(rec_idx)
+        load_total -= outgoing
+        load_total += incoming
+        load_flex_shifted -= outgoing
+        load_flex_shifted += incoming
+        shift_down += outgoing
+        shift_up += incoming
 
-            recovery_candidates.sort(key=lambda i: (base_load[i], abs(i - peak_idx), i))
-            peak_realized = 0.0
-            for rec_idx in recovery_candidates:
-                if remaining <= 1e-12:
-                    break
-                median_gap_allowance = max(0.0, reference_load[peak_idx] - reference_load[rec_idx])
-                recovery_upper = min(
-                    base_load[rec_idx] + median_gap_allowance,
-                    (1.0 + scenario.flex_share) * base_load[rec_idx],
-                    original_annual_peak,
-                    1.0,
-                )
-                capacity = max(0.0, recovery_upper - load_total[rec_idx])
-                if capacity <= 1e-12:
-                    continue
-
-                delta = min(remaining, capacity)
-                load_total[peak_idx] -= delta
-                load_total[rec_idx] += delta
-                load_flex_shifted[peak_idx] -= delta
-                load_flex_shifted[rec_idx] += delta
-                shift_down[peak_idx] += delta
-                shift_up[rec_idx] += delta
-                remaining -= delta
-                peak_realized += delta
-                realized += delta
-                rec_ts = pd.Timestamp(work.loc[rec_idx, "timestamp"])
-                peak_ts = pd.Timestamp(work.loc[peak_idx, "timestamp"])
-                delay_weighted_sum += delta * ((rec_ts - peak_ts).total_seconds() / 3600.0)
-                if load_total[rec_idx] >= recovery_upper - 1e-10:
-                    saturated_recovery_slots.add(int(rec_idx))
-
-            if peak_realized <= 1e-12:
-                no_recovery_slots += 1
-
-        if selected.size:
-            active_selected = selected[shift_down[selected] > 1e-12]
-            event_selected[active_selected] = 1.0
-
+        realized = float(outgoing.sum())
         unmet = max(0.0, shiftable_target - realized)
+        saturated_recovery_slots = {
+            int(rec_idx)
+            for rec_idx in recipient_candidates
+            if incoming[rec_idx] > 1e-12 and load_total[rec_idx] >= original_annual_peak - 1e-10
+        }
+
         daily_rows.append(
             {
                 "year": int(day_frame["year"].iloc[0]),
@@ -239,9 +401,9 @@ def apply_shiftable_flex_for_scenario(
                 "recipient_window_start_hour": float(scenario.recipient_window_start_hour),
                 "recipient_window_end_hour": float(scenario.recipient_window_end_hour),
                 "reference_baseline": reference_col,
-                "event_candidate_steps": int(len(event_candidates)),
-                "selected_peak_steps": int(len(selected)),
-                "active_shift_steps": int(np.sum(shift_down[day_idx] > 1e-12)),
+                "event_candidate_steps": int(len(source_candidates)),
+                "selected_peak_steps": int(len(active_sources)),
+                "active_shift_steps": int(np.sum(outgoing[day_idx] > 1e-12)),
                 "shiftable_target": float(shiftable_target),
                 "shiftable_realized": float(realized),
                 "shiftable_unmet": float(unmet),
@@ -251,8 +413,10 @@ def apply_shiftable_flex_for_scenario(
                 "average_deferment_hours": float(delay_weighted_sum / realized) if realized > 1e-12 else 0.0,
                 "used_eligible_flex_percent": float(realized / shiftable_target * 100.0) if shiftable_target > 1e-12 else 0.0,
                 "fully_recovered_percent": float(realized / shiftable_target * 100.0) if shiftable_target > 1e-12 else 0.0,
-                "no_recovery_slots": int(no_recovery_slots),
-                "active_event_day": bool(len(selected) > 0),
+                "no_recovery_slots": 0,
+                "active_event_day": bool(len(active_sources) > 0),
+                "selection_method": "daily_peak_lp_multi_interval",
+                "optimized_day_peak_after_flex": float(optimized_peak),
             }
         )
 
