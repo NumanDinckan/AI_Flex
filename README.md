@@ -113,6 +113,7 @@ RQ3:
 - `docs/RQ2_METHOD_NOTES.md`: RQ2 flexibility method and Figure 1 interpretation.
 - `docs/RQ3_METHOD_NOTES.md`: RQ3 BESS method, Figure 2 interpretation, and compact scenario comparison table.
 - `docs/SCENARIO_COMPARISON_TABLE.md`: report-ready six-column table for flex and BESS scenarios.
+- `docs/PROJECT_PROCESS_SUMMARY.md`: step-by-step summary of the full project process.
 - `docs/PAPER_METHOD_COMPARISON.md`: comparison with the flexible data-centres whitepaper.
 - `docs/REPO_UPLOAD_CHECKLIST.md`: submission and repository hygiene checklist.
 - `docs/GITHUB_PARALLEL_WORKFLOW.md`: collaboration and run workflow.
