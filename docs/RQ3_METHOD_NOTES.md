@@ -22,7 +22,7 @@ Processing order:
 4. Dispatch BESS on the flex-adjusted full-year load.
 5. Export annual peak summaries and annual mean 48-hour figures.
 
-## Battery Scenarios
+## Battery Scenario Design
 
 The model evaluates four cases:
 
@@ -31,42 +31,63 @@ The model evaluates four cases:
 - `25% Flex + 4h BESS`
 - `25% Flex + 8h BESS`
 
-Battery power is scenario-specific:
+The annual peak of the original utilisation profile is the sizing reference:
 
-- `10%` BESS cases use `battery_power = 0.10 * annual_peak_utilisation`
-- `25%` BESS cases use `battery_power = 0.25 * annual_peak_utilisation`
+```text
+annual_peak = max(utilisation)
+battery_power = battery_power_fraction * annual_peak
+battery_energy = battery_power * duration_hours
+```
 
-Battery energy is:
+Scenario sizing:
 
-- `4h battery_energy = battery_power * 4`
-- `8h battery_energy = battery_power * 8`
+| Scenario | Power Fraction | Duration | Energy |
+| --- | ---: | ---: | ---: |
+| `10% Flex + 4h BESS` | `0.10` | `4h` | `0.40 * annual_peak` |
+| `10% Flex + 8h BESS` | `0.05` | `8h` | `0.40 * annual_peak` |
+| `25% Flex + 4h BESS` | `0.25` | `4h` | `1.00 * annual_peak` |
+| `25% Flex + 8h BESS` | `0.125` | `8h` | `1.00 * annual_peak` |
 
-The `4h` and `8h` labels refer to battery energy duration. They are separate from the RQ2 daily flexibility budgets of `2.5` and `4.0` peak-equivalent hours.
+The `4h` and `8h` labels refer to battery energy duration, not to the RQ2 daily flexibility budgets of `2.5` and `4.0` peak-equivalent hours.
 
-The `25%` BESS cases are also allowed a more aggressive operating envelope than the `10%` cases:
+Within each flex case, the `8h` BESS is energy-matched to its paired `4h` case and has half the power rating. This is a deliberate lower-C-rate sustained-delivery archetype. It should not be described as a same-power, doubled-energy upgrade. The tradeoff is that the `8h` case has less instantaneous peak-clipping capability but can sustain lower-power discharge for longer.
 
-- `10%` cases use a `10%-90%` usable SoC band and keep the terminal target at the carried current SoC
-- `25%` cases use a `5%-95%` usable SoC band and target a lower terminal reserve of `35%` of battery energy
+The usable SoC bands and terminal targets are:
 
-This setup is intentional: the exploratory `25%` flex case is meant to test whether deeper operational flexibility can be paired with a stronger behind-the-meter storage response.
+| Scenario Group | SoC Band | Terminal SoC Target |
+| --- | ---: | ---: |
+| `10%` flex cases | `10%-90%` | `4h`: carried current SoC; `8h`: `50%` |
+| `25%` flex cases | `5%-95%` | `4h`: `35%`; `8h`: `50%` |
 
-## Dispatch Objective
+The `25%` cases remain exploratory because they assume deeper flexible load and a wider usable SoC band. The `8h` cases test a different battery role: sustained delivery and load leveling rather than high-power peak clipping.
 
-The BESS controller is a 48-hour receding-horizon linear program with carried state of charge and historical peak state.
+## Dispatch Optimization
 
-Without a price file, the controller is peak-first:
+The BESS controller is a duration-specific receding-horizon linear program with carried state of charge and historical peak state:
 
-1. minimize residual grid-import peak
-2. minimize terminal state-of-charge deviation
-3. minimize battery throughput
+- `4h` BESS cases use a `48h` rolling horizon.
+- `8h` BESS cases use a `72h` rolling horizon.
 
-With the UK price CSV, the third stage becomes price-aware:
+The longer `8h` horizon is used to reduce horizon-boundary effects and give the medium-duration battery one additional overnight recovery/charging opportunity in the lookahead. The model executes only the first day of each optimized horizon, carries the final executed SoC forward, and then resolves the next horizon.
 
-1. minimize residual grid-import peak
-2. minimize terminal state-of-charge deviation
-3. minimize price-weighted grid import within the peak cap, with a small throughput tie-breaker
+For each rolling horizon, dispatch is solved lexicographically:
 
-Peak shaving remains the primary objective. Price affects dispatch timing only after the feasible peak cap has been established.
+1. Minimize the residual grid-import peak.
+2. Minimize terminal SoC deviation subject to the peak cap from stage 1.
+3. Choose a dispatch pattern subject to the peak cap and terminal slack from stages 1-2.
+
+Without a price file, stage 3 minimizes battery throughput. With the UK price CSV, stage 3 minimizes price-weighted grid import within the feasible peak cap, with a small throughput tie-breaker.
+
+The model constraints enforce:
+
+- battery charge and discharge power limits
+- SoC minimum and maximum limits
+- round-trip efficiency of `90%`
+- no grid export
+- terminal SoC slack accounting
+- historical peak accounting across executed days
+
+Peak shaving remains the primary objective. Price affects dispatch timing only after the feasible peak cap has been established. Therefore, this is not a full tariff, investment, degradation, or electricity-bill optimization.
 
 ## Peak Definitions
 
@@ -84,11 +105,11 @@ From `rq3/bess_summary_intermediate.csv`:
 
 - Original annual peak: `0.3684`.
 - Residual annual peak after RQ2 flexibility: `0.3616` in both the `10%` and `25%` flex cases on this branch.
-- Residual annual peak after BESS ranges from about `0.3454` to `0.3397` across the four BESS cases.
-- Annual peak reduction versus original ranges from about `6.25%` to `7.78%`.
+- Residual annual peak after BESS ranges from about `0.3454` to `0.3407` across the four BESS cases.
+- Annual peak reduction versus original ranges from about `6.24%` to `7.51%`.
 - `price_signal_used = True`, because the UK price CSV was available.
 
-The strongest case on this branch is `25% Flex + 8h BESS` at `0.3397`, equivalent to about `7.78%` annual peak reduction versus original. The `25%` BESS cases now outperform the matching `10%` cases not only because of longer energy duration, but also because they are allowed a larger battery power fraction and a looser SoC reserve policy.
+The strongest annual-peak case on this branch is `25% Flex + 8h BESS` at `0.3407`, equivalent to about `7.51%` annual peak reduction versus original. The strongest price-weighted cost proxy result is `25% Flex + 4h BESS`. This split is expected: the energy-matched lower-power `8h` cases produce less sharp peak clipping and less price-arbitrage leverage than a same-power 8h battery, but they better represent a sustained-delivery storage archetype.
 
 ## Inherited RQ2 Limitations
 
@@ -143,15 +164,15 @@ A report-ready Markdown copy is available in `docs/SCENARIO_COMPARISON_TABLE.md`
 
 Use:
 
-> RQ3 models a co-located BESS as a behind-the-meter asset operating on the RQ2 flex-adjusted data-centre load. Dispatch is solved over a 48-hour receding horizon at half-hour resolution. The objective minimizes residual peaks first and uses UK electricity price as a secondary dispatch signal when price data is available.
+> RQ3 models a co-located BESS as a behind-the-meter asset operating on the RQ2 flex-adjusted data-centre load. Dispatch is solved over a duration-specific receding horizon at half-hour resolution: 48 hours for 4h batteries and 72 hours for 8h batteries. The objective minimizes residual peaks first and uses UK electricity price as a secondary dispatch signal when price data is available.
 
 Also use:
 
-> The battery is not sized identically across all scenarios. The `10%` BESS cases use battery power equal to `10%` of the annual peak utilisation, while the `25%` BESS cases use `25%`. The exploratory `25%` cases also operate with a wider usable SoC band (`5%-95%`) and a lower terminal reserve target (`35%` of battery energy), allowing them to respond more aggressively to peak events.
+> The battery is not sized identically across all scenarios. Within each flex case, the 8h BESS is energy-matched to the paired 4h BESS but has half the power rating, so it represents a lower-C-rate sustained-delivery asset rather than a same-power energy expansion. The 8h cases also target 50% terminal SoC to preserve inter-day shifting energy.
 
 For the result:
 
-> In the 2025 utilisation profile generated on this branch, RQ2 flexibility alone delivers only a modest peak change, but adding BESS reduces the annual peak from `0.3684` to between about `0.3454` and `0.3397`, equivalent to about `6.25%` to `7.78%` peak reduction depending on the scenario. The best case is `25% Flex + 8h BESS`.
+> In the 2025 utilisation profile generated on this branch, RQ2 flexibility alone delivers only a modest peak change, but adding BESS reduces the annual peak from `0.3684` to between about `0.3454` and `0.3407`, equivalent to about `6.24%` to `7.51%` peak reduction depending on the scenario. The best annual-peak case is `25% Flex + 8h BESS`.
 
 ## Presentation Use
 

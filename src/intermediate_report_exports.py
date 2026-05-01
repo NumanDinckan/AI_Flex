@@ -246,7 +246,7 @@ def build_annual_mean_horizon(
         elapsed_hours = (window["timestamp"] - start).dt.total_seconds() / 3600.0
         window["horizon_index"] = np.rint(elapsed_hours / dt_hours).astype(int)
         window = window[(window["horizon_index"] >= 0) & (window["horizon_index"] < steps)]
-        if not window.empty:
+        if window["horizon_index"].nunique() == steps:
             windows.append(window[["horizon_index", *numeric_cols]])
 
     if windows:

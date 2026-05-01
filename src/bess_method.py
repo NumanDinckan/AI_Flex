@@ -11,6 +11,10 @@ SOC_MIN_FRACTION = 0.10
 SOC_MAX_FRACTION = 0.90
 ROUND_TRIP_EFFICIENCY = 0.90
 BESS_HORIZON_DAYS = 2
+HORIZON_DAYS_BY_DURATION: dict[str, int] = {
+    "4h": 2,
+    "8h": 3,
+}
 
 
 @dataclass(frozen=True)
@@ -50,10 +54,10 @@ BESS_SCENARIOS: tuple[BessScenario, ...] = (
         scenario="10%_flex + 8h-Battery",
         battery_duration="8h",
         duration_hours=8.0,
-        battery_power_fraction=0.10,
+        battery_power_fraction=0.05,
         soc_min_fraction=SOC_MIN_FRACTION,
         soc_max_fraction=SOC_MAX_FRACTION,
-        terminal_soc_fraction=None,
+        terminal_soc_fraction=0.50,
         flex_col="load_flex_10",
         load_col="load_10_flex_8h_batt",
         soc_col="soc_10_flex_8h_batt",
@@ -80,10 +84,10 @@ BESS_SCENARIOS: tuple[BessScenario, ...] = (
         scenario="25%_flex + 8h-Battery",
         battery_duration="8h",
         duration_hours=8.0,
-        battery_power_fraction=0.25,
+        battery_power_fraction=0.125,
         soc_min_fraction=0.05,
         soc_max_fraction=0.95,
-        terminal_soc_fraction=0.35,
+        terminal_soc_fraction=0.50,
         flex_col="load_flex_25",
         load_col="load_25_flex_8h_batt",
         soc_col="soc_25_flex_8h_batt",
@@ -92,6 +96,10 @@ BESS_SCENARIOS: tuple[BessScenario, ...] = (
         net_power_col="net_batt_25_flex_8h_batt",
     ),
 )
+
+
+def get_bess_horizon_days(scenario: BessScenario) -> int:
+    return HORIZON_DAYS_BY_DURATION.get(scenario.battery_duration, BESS_HORIZON_DAYS)
 
 
 def _clip_soc(
@@ -508,15 +516,21 @@ def simulate_bess(
             battery_energy = battery_power * scenario.duration_hours
             current_soc = 0.5 * battery_energy
             historical_peak = 0.0
+            horizon_days = get_bess_horizon_days(scenario)
+            planned_horizon_hours = int(round(horizon_days * 24.0))
 
             for day_pos, date in enumerate(dates):
                 exec_idx = index_by_date[date]
-                horizon_dates = dates[day_pos : day_pos + BESS_HORIZON_DAYS]
+                horizon_dates = dates[day_pos : day_pos + horizon_days]
                 horizon_idx = np.concatenate([index_by_date[d] for d in horizon_dates])
 
                 horizon_load = out.loc[horizon_idx, scenario.flex_col].to_numpy(dtype=float)
                 horizon_price = out.loc[horizon_idx, price_col].to_numpy(dtype=float) if has_price else None
-                controller_method = "rolling_48h_peak_cap_price_lp" if has_price else "rolling_48h_peak_cap_lp"
+                controller_method = (
+                    f"rolling_{planned_horizon_hours}h_peak_cap_price_lp"
+                    if has_price
+                    else f"rolling_{planned_horizon_hours}h_peak_cap_lp"
+                )
                 used_fallback = False
                 terminal_slack = 0.0
                 historical_peak_before_dispatch = float(historical_peak)
@@ -552,7 +566,11 @@ def simulate_bess(
                         soc_min_fraction=scenario.soc_min_fraction,
                         soc_max_fraction=scenario.soc_max_fraction,
                     )
-                    controller_method = "rolling_48h_peak_cap_price_fallback" if has_price else "rolling_48h_peak_cap_fallback"
+                    controller_method = (
+                        f"rolling_{planned_horizon_hours}h_peak_cap_price_fallback"
+                        if has_price
+                        else f"rolling_{planned_horizon_hours}h_peak_cap_fallback"
+                    )
                     used_fallback = True
 
                 n_exec = len(exec_idx)
@@ -618,4 +636,3 @@ def simulate_bess(
                 current_soc = final_soc
 
     return out, pd.DataFrame(battery_rows)
-

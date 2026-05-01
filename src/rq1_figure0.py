@@ -95,8 +95,13 @@ def _center_variability_metrics(centres_year_df: pd.DataFrame) -> pd.DataFrame:
         peak_to_avg = float(peak_u / mean_u) if mean_u > 0 else np.nan
         cv = float(std_u / mean_u) if mean_u > 0 else np.nan
 
-        jump_threshold = float(np.quantile(deltas, 0.90)) if deltas.size else np.nan
-        jump_count = int(np.sum(deltas >= jump_threshold)) if deltas.size and not np.isnan(jump_threshold) else 0
+        positive_deltas = deltas[deltas > 0.0]
+        jump_threshold = float(np.quantile(positive_deltas, 0.90)) if positive_deltas.size else np.nan
+        jump_count = (
+            int(np.sum(deltas >= jump_threshold))
+            if positive_deltas.size and not np.isnan(jump_threshold)
+            else 0
+        )
         mean_abs_delta_1h = float(np.mean(deltas)) if deltas.size else 0.0
 
         rows.append(
@@ -443,7 +448,7 @@ def plot_rq1_year_overview(
     ax4b.set_ylabel("peak reduction (% of peak)")
     ax4b.tick_params(axis="y", colors="#8b1a16")
 
-    for bar, hours in zip(bars, peak_opportunity["hours_above_cap"].to_numpy(dtype=float), strict=False):
+    for bar, hours in zip(bars, peak_opportunity["hours_above_cap"].to_numpy(dtype=float)):
         ax4.text(
             bar.get_x() + bar.get_width() / 2,
             bar.get_height(),

@@ -7,8 +7,8 @@ import numpy as np
 import pandas as pd
 
 
-EVENT_START_HOUR = 14.0
-EVENT_END_HOUR = 22.0
+EVENT_START_HOUR = 11.0
+EVENT_END_HOUR = 19.0
 
 
 def apply_zoomed_ylim(ax: plt.Axes, *series: pd.Series) -> None:
@@ -178,11 +178,11 @@ def build_annual_mean_horizon(
         elapsed_hours = (window["timestamp"] - start).dt.total_seconds() / 3600.0
         window["horizon_index"] = np.rint(elapsed_hours / dt_hours).astype(int)
         window = window[(window["horizon_index"] >= 0) & (window["horizon_index"] < steps)]
-        if not window.empty:
+        if window["horizon_index"].nunique() == steps:
             windows.append(window[["horizon_index", *numeric_cols]])
 
     if not windows:
-        raise ValueError("No annual 48-hour windows could be built for RQ2.")
+        raise ValueError("No complete annual 48-hour windows could be built for RQ2.")
 
     profile = (
         pd.concat(windows, ignore_index=True)
@@ -223,7 +223,7 @@ def plot_figure1(day_df: pd.DataFrame, year: int, out_file: Path) -> None:
         original=day_df["utilisation"],
         shifted=day_df["load_flex_25"],
         reduction_label="Event-window reduction",
-        up_label="Recovery in 22:00-02:00",
+        up_label="Recovery in 22:00-06:00",
     )
 
     ax.plot(x, day_df["utilisation"], label="Baseline Load", linewidth=2.5, color="#173f5f", zorder=4)
@@ -232,7 +232,7 @@ def plot_figure1(day_df: pd.DataFrame, year: int, out_file: Path) -> None:
     ax.text(
         0.5,
         1.01,
-        "Full-year mean daily profile after shifting the highest 3 consecutive peak hours into the 22:00-02:00 off-peak window",
+        "Full-year mean daily profile after co-optimized peak-window reductions and 22:00-06:00 overnight recovery",
         transform=ax.transAxes,
         ha="center",
         va="bottom",
@@ -259,7 +259,7 @@ def plot_figure1(day_df: pd.DataFrame, year: int, out_file: Path) -> None:
         "10% Flex",
         "25% Flex",
         "Event-window reduction",
-        "Recovery in 22:00-02:00",
+        "Recovery in 22:00-06:00",
     ]
     handle_map = dict(zip(labels, handles))
     ordered_labels = [label for label in order if label in handle_map]
@@ -333,7 +333,7 @@ def plot_annual_shift_components(day_df: pd.DataFrame, year: int, out_file: Path
     fig.text(
         0.5,
         0.955,
-        "Reductions occur in the selected 3-hour peak block; recovery is constrained to 22:00-02:00 and averaged over the full year.",
+        "Reductions are selected within the 11:00-19:00 peak window; recovery is constrained to 22:00-06:00 and averaged over the full year.",
         ha="center",
         va="top",
         fontsize=10,
@@ -383,7 +383,7 @@ def plot_annual_48h_shift_window(
             alpha=0.20,
             label="overnight recovery",
         )
-        for start, end in [(22, 26), (46, 48)]:
+        for start, end in [(22, 30), (46, 48)]:
             ax.axvspan(start, end, color="#bdd7e7", alpha=0.12, linewidth=0)
         apply_zoomed_ylim(ax, horizon_df["utilisation"], horizon_df[flex_col])
         ax.set_ylabel("utilisation")
@@ -398,7 +398,7 @@ def plot_annual_48h_shift_window(
     fig.text(
         0.5,
         0.955,
-        "Annual mean 0-48h profile averaged from all rolling 48-hour windows in the selected year; no specific calendar days are shown.",
+        "Annual mean 0-48h profile averaged from complete daily 48-hour windows in the selected year; no specific calendar days are shown.",
         ha="center",
         va="top",
         fontsize=10,
@@ -411,10 +411,19 @@ def plot_annual_48h_shift_window(
 
 def _scenario_definition(scenario_key: str | None) -> str:
     if scenario_key == "10":
-        return "up to 10% reduction for max 3 consecutive peak hours; shifted to 22:00-02:00"
+        return "10% load reduction co-optimized across up to 2.5 peak-equivalent hours per day; shifted to 22:00-06:00"
     if scenario_key == "25":
-        return "up to 25% reduction for max 3 consecutive peak hours; shifted to 22:00-02:00"
+        return "25% load reduction co-optimized across up to 4.0 peak-equivalent hours per day; shifted to 22:00-06:00"
     return "no flexibility applied"
+
+
+def _first_non_null(df: pd.DataFrame, column: str, default: object) -> object:
+    if column not in df.columns:
+        return default
+    values = df[column].dropna()
+    if values.empty:
+        return default
+    return values.iloc[0]
 
 
 def make_flex_summary(
@@ -457,8 +466,8 @@ def make_flex_summary(
             unmet_energy = float(daily_subset["shiftable_unmet"].sum() * dt_hours) if not daily_subset.empty else 0.0
             if not daily_subset.empty:
                 active_flex_days = int(np.sum(daily_subset["active_event_day"].to_numpy(dtype=bool)))
-                recipient_window = str(daily_subset["recipient_window"].dropna().iloc[0])
-                max_peak_hours = float(daily_subset["max_peak_hours"].dropna().iloc[0])
+                recipient_window = str(_first_non_null(daily_subset, "recipient_window", ""))
+                max_peak_hours = float(_first_non_null(daily_subset, "max_peak_hours", np.nan))
 
         rows.append(
             {

@@ -79,7 +79,7 @@ def _plot_figure2_mean_horizon(
     ax_load.text(
         0.5,
         1.01,
-        "Annual mean 0-48h profile averaged from all rolling 48-hour windows in the selected year; no specific calendar days are shown.",
+        "Annual mean 0-48h profile averaged from complete daily 48-hour windows in the selected year; no specific calendar days are shown.",
         transform=ax_load.transAxes,
         ha="center",
         va="bottom",
@@ -347,8 +347,10 @@ def run_rq3(
     summary = output_dir / "bess_summary_intermediate.csv"
     scenario_table = output_dir / f"scenario_comparison_table_{year}.csv"
 
-    battery_energy_4h = _lookup_battery_energy(battery_daily_stats, year, "10%_flex + 4h-Battery")
-    battery_energy_8h = _lookup_battery_energy(battery_daily_stats, year, "10%_flex + 8h-Battery")
+    battery_energy_10_4h = _lookup_battery_energy(battery_daily_stats, year, "10%_flex + 4h-Battery")
+    battery_energy_10_8h = _lookup_battery_energy(battery_daily_stats, year, "10%_flex + 8h-Battery")
+    battery_energy_25_4h = _lookup_battery_energy(battery_daily_stats, year, "25%_flex + 4h-Battery")
+    battery_energy_25_8h = _lookup_battery_energy(battery_daily_stats, year, "25%_flex + 8h-Battery")
 
     _plot_figure2_mean_horizon(
         horizon_df=mean_horizon_df,
@@ -361,8 +363,8 @@ def run_rq3(
         net8_col="net_batt_10_flex_8h_batt",
         soc4_col="soc_10_flex_4h_batt",
         soc8_col="soc_10_flex_8h_batt",
-        battery_energy_4h=battery_energy_4h,
-        battery_energy_8h=battery_energy_8h,
+        battery_energy_4h=battery_energy_10_4h,
+        battery_energy_8h=battery_energy_10_8h,
         title="10% Flex",
         flex_label="10%",
     )
@@ -377,8 +379,8 @@ def run_rq3(
         net8_col="net_batt_25_flex_8h_batt",
         soc4_col="soc_25_flex_4h_batt",
         soc8_col="soc_25_flex_8h_batt",
-        battery_energy_4h=battery_energy_4h,
-        battery_energy_8h=battery_energy_8h,
+        battery_energy_4h=battery_energy_25_4h,
+        battery_energy_8h=battery_energy_25_8h,
         title="25% Flex",
         flex_label="25%",
     )

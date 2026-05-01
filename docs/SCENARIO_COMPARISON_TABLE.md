@@ -120,12 +120,12 @@ The residual peak column is kept because it anchors the percentage reduction in 
 
 | Scenario | Flex Case | BESS Duration | Residual Peak Utilisation | Annual Peak Reduction vs Original (%) | Price-Weighted Cost Reduction vs Original (%) |
 | --- | --- | --- | ---: | ---: | ---: |
-| 10% Flex only | 10% | No BESS | 0.5643 | 0.0000 | 0.0667 |
-| 25% Flex only | 25% | No BESS | 0.5643 | 0.0000 | 0.0631 |
-| 10% Flex + 4h BESS | 10% | 4h | 0.4239 | 24.8901 | 2.7884 |
-| 10% Flex + 8h BESS | 10% | 8h | 0.4239 | 24.8919 | 3.3791 |
-| 25% Flex + 4h BESS | 25% | 4h | 0.4239 | 24.8901 | 2.7891 |
-| 25% Flex + 8h BESS | 25% | 8h | 0.4239 | 24.8919 | 3.3761 |
+| 10% Flex only | 10% | No BESS | 0.3616 | 1.8355 | 0.0352 |
+| 25% Flex only | 25% | No BESS | 0.3616 | 1.8355 | 0.0917 |
+| 10% Flex + 4h BESS | 10% | 4h | 0.3454 | 6.2470 | 0.6297 |
+| 10% Flex + 8h BESS | 10% | 8h | 0.3454 | 6.2362 | 0.4887 |
+| 25% Flex + 4h BESS | 25% | 4h | 0.3412 | 7.3718 | 0.9285 |
+| 25% Flex + 8h BESS | 25% | 8h | 0.3407 | 7.5064 | 0.7178 |
 
 ## Interpretation
 
@@ -141,10 +141,9 @@ Because the load data is in utilisation ratios, the values should be interpreted
 
 The current table was checked against an independent recomputation from the full-year series:
 
-- 2025 rows used: `8773`
-- UK price matches: `8773`
-- original peak: `0.564334880830`
-- original price-weighted cost proxy: `143792.2805`
+- 2025 half-hour rows used: `17520`
+- UK price signal used: `True`
+- original peak: `0.3683996547544206`
 
 The table values match the recomputed values after rounding to four decimals.
 

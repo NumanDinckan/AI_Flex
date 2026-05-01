@@ -51,18 +51,18 @@ Use `docs/RQ1_GRAPH_GUIDE.md` for detailed Figure 0 interpretation.
 
 RQ2 defines flexibility operationally:
 
-- `10%` case: up to `10%` load reduction for at most `3` consecutive peak hours
-- `25%` case: up to `25%` load reduction for at most `3` consecutive peak hours
-- both cases recover shifted load in `22:00-02:00`
+- `10%` case: `10%` load reduction co-optimized across up to `2.5` peak-equivalent hours per day
+- `25%` case: `25%` load reduction co-optimized across up to `4.0` peak-equivalent hours per day
+- both cases recover shifted load in `22:00-06:00`
 
 Use this wording:
 
-> Flexibility is defined by reduction magnitude, maximum event duration, and recipient hours. During selected weekday peak-event windows, up to 10% or 25% of load can be reduced for at most 3 consecutive hours, and the shifted load is recovered in the fixed 22:00-02:00 off-peak window.
+> Flexibility is defined by reduction magnitude, daily peak-equivalent budget, source window, and recipient hours. The 10% case allows 10% load reduction under a 2.5 peak-equivalent-hour daily budget, while the 25% case allows 25% load reduction under a 4.0 peak-equivalent-hour daily budget. In both cases, source reductions are restricted to 11:00-19:00 and shifted load is recovered in the fixed 22:00-06:00 overnight window.
 
 Current 2025 result:
 
 - RQ2 shifts load in both scenarios.
-- The absolute annual peak remains `0.5643` after RQ2 flexibility.
+- The annual peak falls from `0.3684` to `0.3616` after RQ2 flexibility, about `1.84%`.
 - Therefore, RQ2 should be presented as an operational load-shifting scenario and setup for RQ3, not as the final peak-reduction result.
 
 ## RQ3 Report Message
@@ -71,14 +71,14 @@ RQ3 applies BESS dispatch after RQ2 flexibility. The BESS controller is peak-fir
 
 Use this wording:
 
-> RQ3 models a co-located BESS as a behind-the-meter asset operating on the flex-adjusted data-centre load. Dispatch is solved over a 48-hour receding horizon. It minimizes residual peaks first and uses UK electricity price as a secondary criterion within the feasible peak cap.
+> RQ3 models a co-located BESS as a behind-the-meter asset operating on the flex-adjusted data-centre load. Dispatch is solved over a duration-specific receding horizon: 48 hours for 4h batteries and 72 hours for 8h batteries. It minimizes residual peaks first and uses UK electricity price as a secondary criterion within the feasible peak cap.
 
 Current 2025 result from `rq3/bess_summary_intermediate.csv`:
 
-- original annual peak: `0.5643`
-- residual annual peak after RQ2 flexibility: `0.5643`
-- residual annual peak after BESS: about `0.4239`
-- annual peak reduction after BESS: about `24.9%`
+- original annual peak: `0.3684`
+- residual annual peak after RQ2 flexibility: `0.3616`
+- residual annual peak after BESS: about `0.3454` to `0.3407`
+- annual peak reduction after BESS: about `6.24%` to `7.51%`
 - price signal used: `True`
 
 The annual peak metrics are the main result. The annual mean 48-hour Figure 2 is a visualization and should not replace the annual peak summary.
@@ -101,17 +101,17 @@ Slide 3: RQ2 flexibility definition
 
 - Explain magnitude, duration, and recipient window.
 - Show exactly what `10%` and `25%` mean.
-- Mention the fixed `22:00-02:00` recovery window.
+- Mention the fixed `22:00-06:00` recovery window.
 
 Slide 4: RQ2 load-shifting result
 
 - Use Figure 1 or the annual shift-components view.
-- Explain that load is shifted but the absolute annual peak does not fall under this rule.
+- Explain that load is shifted and annual peak reduction is modest under this rule.
 
 Slide 5: RQ3 BESS result
 
 - Use Figure 2.
-- State the residual annual peak reduction: `0.5643` to about `0.4239`, or about `24.9%`.
+- State the residual annual peak reduction: `0.3684` to about `0.3407` in the strongest case, or about `7.51%`.
 - Mention that UK price data is used as a secondary dispatch signal.
 
 Slide 6: Comparison with literature

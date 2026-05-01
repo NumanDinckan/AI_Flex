@@ -21,15 +21,15 @@ RQ2:
 
 - Applies explicit load-shifting scenarios to the full-year half-hour profile.
 - Defines flexibility by magnitude, duration, and recipient window.
-- Uses `10%` and `25%` load-reduction cases for at most `3` consecutive peak hours.
-- Recovers shifted load in the fixed `22:00-02:00` off-peak window.
+- Uses `10%` and `25%` load-reduction cases with daily peak-equivalent budgets of `2.5` and `4.0` hours.
+- Recovers shifted load in the fixed `22:00-06:00` off-peak window.
 - Reports annual mean-day and annual mean 48-hour views in `rq2/`.
 
 RQ3:
 
 - Dispatches BESS after RQ2 flexibility.
-- Uses `4h` and `8h` BESS cases.
-- Runs a 48-hour receding-horizon linear program over the full-year series.
+- Uses `4h` and `8h` BESS cases, with the `8h` cases energy-matched to the paired `4h` cases and operated at half the power rating.
+- Runs a duration-specific receding-horizon linear program over the full-year series: `48h` for `4h` BESS and `72h` for `8h` BESS.
 - Minimizes residual peak first.
 - Uses UK price as a secondary dispatch signal when the price CSV is present.
 - Reports annual peak summaries and annual mean 48-hour views in `rq3/`.
@@ -65,9 +65,9 @@ The whitepaper models physical data-centre loads in MW, including examples such 
 | RQ1 equivalent | Observed variability and peak concentration | Not the central focus |
 | Flex trigger | Selected weekday peak-event windows | Modelled transmission or generation constraint hours |
 | Flex magnitude | `10%` and `25%` load-shifting cases | Site-level compute flexibility and conditional firm shares |
-| Flex duration | Maximum `3` consecutive peak hours | Curtailment durations from grid studies and flexibility assumptions |
-| Load recovery | Fixed `22:00-02:00` recovery window | No equivalent fixed overnight recovery rule |
-| BESS sizing | Fixed scenario sizing based on annual peak utilisation | REopt cost-optimizes resource portfolios |
+| Flex duration | Daily peak-equivalent budgets of `2.5` and `4.0` hours | Curtailment durations from grid studies and flexibility assumptions |
+| Load recovery | Fixed `22:00-06:00` recovery window | No equivalent fixed overnight recovery rule |
+| BESS sizing | Fixed scenario sizing based on annual peak utilisation; 8h cases are energy-matched lower-power variants | REopt cost-optimizes resource portfolios |
 | Price treatment | Secondary BESS dispatch objective and plot overlay | Tariffs, LMPs, demand charges, and capacity-cost modelling |
 | Outputs | RQ figures and CSV summaries | Curtailment hours, resource portfolios, grid availability, costs, emissions |
 
