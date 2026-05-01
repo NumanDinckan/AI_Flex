@@ -22,7 +22,7 @@ RQ2:
 - Applies explicit load-shifting scenarios to the full-year half-hour profile.
 - Defines flexibility by magnitude, duration, and recipient window.
 - Uses `10%` and `25%` load-reduction cases with daily peak-equivalent budgets of `2.5` and `4.0` hours.
-- Recovers shifted load in the fixed `22:00-06:00` off-peak window.
+- Recovers shifted load in scenario-specific off-peak windows: `22:00-06:00` for `10%` flex and `20:00-08:00` for `25%` flex.
 - Reports annual mean-day and annual mean 48-hour views in `rq2/`.
 
 RQ3:
@@ -66,7 +66,7 @@ The whitepaper models physical data-centre loads in MW, including examples such 
 | Flex trigger | Selected weekday peak-event windows | Modelled transmission or generation constraint hours |
 | Flex magnitude | `10%` and `25%` load-shifting cases | Site-level compute flexibility and conditional firm shares |
 | Flex duration | Daily peak-equivalent budgets of `2.5` and `4.0` hours | Curtailment durations from grid studies and flexibility assumptions |
-| Load recovery | Fixed `22:00-06:00` recovery window | No equivalent fixed overnight recovery rule |
+| Load recovery | Scenario-specific off-peak recovery windows: `22:00-06:00` and `20:00-08:00` | No equivalent fixed overnight recovery rule |
 | BESS sizing | Fixed scenario sizing based on annual peak utilisation; 8h cases are energy-matched lower-power variants | REopt cost-optimizes resource portfolios |
 | Price treatment | Secondary BESS dispatch objective and plot overlay | Tariffs, LMPs, demand charges, and capacity-cost modelling |
 | Outputs | RQ figures and CSV summaries | Curtailment hours, resource portfolios, grid availability, costs, emissions |

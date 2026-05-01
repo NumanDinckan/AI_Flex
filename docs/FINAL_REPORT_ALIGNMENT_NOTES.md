@@ -28,7 +28,7 @@ The report should present the analysis in three steps:
 2. RQ2 turns that opportunity into a transparent load-shifting scenario.
 3. RQ3 adds BESS dispatch after the flexibility scenario.
 
-This sequencing is important. RQ1 does not apply flexibility. RQ2 applies flexibility but does not reduce the absolute annual peak in the current dataset. RQ3 provides the main annual peak reduction result.
+This sequencing is important. RQ1 does not apply flexibility. RQ2 applies flexibility and gives a modest annual peak reduction in the current dataset. RQ3 provides the main annual peak reduction result.
 
 ## RQ1 Report Message
 
@@ -53,16 +53,19 @@ RQ2 defines flexibility operationally:
 
 - `10%` case: `10%` load reduction co-optimized across up to `2.5` peak-equivalent hours per day
 - `25%` case: `25%` load reduction co-optimized across up to `4.0` peak-equivalent hours per day
-- both cases recover shifted load in `22:00-06:00`
+- shifted load is recovered in `22:00-06:00` for `10%` flex and `20:00-08:00` for `25%` flex
 
 Use this wording:
 
-> Flexibility is defined by reduction magnitude, daily peak-equivalent budget, source window, and recipient hours. The 10% case allows 10% load reduction under a 2.5 peak-equivalent-hour daily budget, while the 25% case allows 25% load reduction under a 4.0 peak-equivalent-hour daily budget. In both cases, source reductions are restricted to 11:00-19:00 and shifted load is recovered in the fixed 22:00-06:00 overnight window.
+> Flexibility is defined by reduction magnitude, daily peak-equivalent budget, source window, and recipient hours. The 10% case allows 10% load reduction under a 2.5 peak-equivalent-hour daily budget, while the 25% case allows 25% load reduction under a 4.0 peak-equivalent-hour daily budget. In both cases, source reductions are restricted to 11:00-19:00. Shifted load is recovered in 22:00-06:00 for the 10% case and 20:00-08:00 for the exploratory 25% case.
+>
+> The flexibility selector is load-driven rather than price-driven. Price responsiveness is reserved for the BESS dispatch layer so RQ2 remains a single-objective peak-shaving scenario.
 
 Current 2025 result:
 
 - RQ2 shifts load in both scenarios.
 - The annual peak falls from `0.3684` to `0.3616` after RQ2 flexibility, about `1.84%`.
+- The wider `25%` recovery corridor raises shifted energy to about `27.95` utilisation-hours, but recovery diagnostics still flag high unmet budget on all 365 days.
 - Therefore, RQ2 should be presented as an operational load-shifting scenario and setup for RQ3, not as the final peak-reduction result.
 
 ## RQ3 Report Message
@@ -77,8 +80,8 @@ Current 2025 result from `rq3/bess_summary_intermediate.csv`:
 
 - original annual peak: `0.3684`
 - residual annual peak after RQ2 flexibility: `0.3616`
-- residual annual peak after BESS: about `0.3454` to `0.3407`
-- annual peak reduction after BESS: about `6.24%` to `7.51%`
+- residual annual peak after BESS: about `0.3454` to `0.3404`
+- annual peak reduction after BESS: about `6.24%` to `7.60%`
 - price signal used: `True`
 
 The annual peak metrics are the main result. The annual mean 48-hour Figure 2 is a visualization and should not replace the annual peak summary.
@@ -101,17 +104,17 @@ Slide 3: RQ2 flexibility definition
 
 - Explain magnitude, duration, and recipient window.
 - Show exactly what `10%` and `25%` mean.
-- Mention the fixed `22:00-06:00` recovery window.
+- Mention the scenario-specific recovery windows: `22:00-06:00` for `10%` and `20:00-08:00` for `25%`.
 
 Slide 4: RQ2 load-shifting result
 
 - Use Figure 1 or the annual shift-components view.
-- Explain that load is shifted and annual peak reduction is modest under this rule.
+- Explain that load is shifted, the 25% case realizes more shifted energy, and annual peak reduction is still modest under this rule.
 
 Slide 5: RQ3 BESS result
 
 - Use Figure 2.
-- State the residual annual peak reduction: `0.3684` to about `0.3407` in the strongest case, or about `7.51%`.
+- State the residual annual peak reduction: `0.3684` to about `0.3404` in the strongest case, or `7.6045%`.
 - Mention that UK price data is used as a secondary dispatch signal.
 
 Slide 6: Comparison with literature
@@ -148,7 +151,7 @@ Slide 8: Backup caveats
 Avoid:
 
 - RQ1 proves the loads are technically or contractually flexible.
-- RQ2 reduces the annual peak in the current generated results.
+- RQ2 is the main annual peak-reduction result.
 - RQ3 is a full electricity-bill optimization.
 - Utilisation ratios can be interpreted directly as MW.
 - The project replicates the whitepaper's BYOC or conditional firm service method.

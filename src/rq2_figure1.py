@@ -223,7 +223,7 @@ def plot_figure1(day_df: pd.DataFrame, year: int, out_file: Path) -> None:
         original=day_df["utilisation"],
         shifted=day_df["load_flex_25"],
         reduction_label="Event-window reduction",
-        up_label="Recovery in 22:00-06:00",
+        up_label="Recovery-window increase",
     )
 
     ax.plot(x, day_df["utilisation"], label="Baseline Load", linewidth=2.5, color="#173f5f", zorder=4)
@@ -232,7 +232,7 @@ def plot_figure1(day_df: pd.DataFrame, year: int, out_file: Path) -> None:
     ax.text(
         0.5,
         1.01,
-        "Full-year mean daily profile after co-optimized peak-window reductions and 22:00-06:00 overnight recovery",
+        "Full-year mean daily profile after co-optimized peak-window reductions and scenario-specific recovery",
         transform=ax.transAxes,
         ha="center",
         va="bottom",
@@ -259,7 +259,7 @@ def plot_figure1(day_df: pd.DataFrame, year: int, out_file: Path) -> None:
         "10% Flex",
         "25% Flex",
         "Event-window reduction",
-        "Recovery in 22:00-06:00",
+        "Recovery-window increase",
     ]
     handle_map = dict(zip(labels, handles))
     ordered_labels = [label for label in order if label in handle_map]
@@ -333,7 +333,7 @@ def plot_annual_shift_components(day_df: pd.DataFrame, year: int, out_file: Path
     fig.text(
         0.5,
         0.955,
-        "Reductions are selected within the 11:00-19:00 peak window; recovery is constrained to 22:00-06:00 and averaged over the full year.",
+        "Reductions are selected within 11:00-19:00; recovery is 22:00-06:00 for 10% and 20:00-08:00 for 25%.",
         ha="center",
         va="top",
         fontsize=10,
@@ -383,7 +383,8 @@ def plot_annual_48h_shift_window(
             alpha=0.20,
             label="overnight recovery",
         )
-        for start, end in [(22, 30), (46, 48)]:
+        recovery_spans = [(22, 30), (46, 48)] if suffix == "10" else [(20, 32), (44, 48)]
+        for start, end in recovery_spans:
             ax.axvspan(start, end, color="#bdd7e7", alpha=0.12, linewidth=0)
         apply_zoomed_ylim(ax, horizon_df["utilisation"], horizon_df[flex_col])
         ax.set_ylabel("utilisation")
@@ -413,7 +414,7 @@ def _scenario_definition(scenario_key: str | None) -> str:
     if scenario_key == "10":
         return "10% load reduction co-optimized across up to 2.5 peak-equivalent hours per day; shifted to 22:00-06:00"
     if scenario_key == "25":
-        return "25% load reduction co-optimized across up to 4.0 peak-equivalent hours per day; shifted to 22:00-06:00"
+        return "25% load reduction co-optimized across up to 4.0 peak-equivalent hours per day; shifted to 20:00-08:00"
     return "no flexibility applied"
 
 
@@ -457,6 +458,11 @@ def make_flex_summary(
         active_flex_days = 0
         recipient_window = ""
         max_peak_hours = np.nan
+        mean_unmet_shift_budget_percent = np.nan
+        max_unmet_shift_budget_percent = np.nan
+        high_unmet_recovery_days = 0
+        recovery_saturation_days = 0
+        mean_recovery_capacity_used_percent = np.nan
 
         if scenario_key is not None:
             daily_subset = flex_daily_stats[
@@ -468,6 +474,19 @@ def make_flex_summary(
                 active_flex_days = int(np.sum(daily_subset["active_event_day"].to_numpy(dtype=bool)))
                 recipient_window = str(_first_non_null(daily_subset, "recipient_window", ""))
                 max_peak_hours = float(_first_non_null(daily_subset, "max_peak_hours", np.nan))
+                if "unmet_shift_budget_percent" in daily_subset:
+                    mean_unmet_shift_budget_percent = float(daily_subset["unmet_shift_budget_percent"].mean())
+                    max_unmet_shift_budget_percent = float(daily_subset["unmet_shift_budget_percent"].max())
+                if "high_unmet_recovery_warning" in daily_subset:
+                    high_unmet_recovery_days = int(
+                        np.sum(daily_subset["high_unmet_recovery_warning"].to_numpy(dtype=bool))
+                    )
+                if "recovery_saturation_slots" in daily_subset:
+                    recovery_saturation_days = int(
+                        np.sum(daily_subset["recovery_saturation_slots"].to_numpy(dtype=float) > 0)
+                    )
+                if "recovery_capacity_used_percent" in daily_subset:
+                    mean_recovery_capacity_used_percent = float(daily_subset["recovery_capacity_used_percent"].mean())
 
         rows.append(
             {
@@ -501,6 +520,11 @@ def make_flex_summary(
                 "active_flex_days": active_flex_days,
                 "max_peak_hours": max_peak_hours,
                 "recipient_window": recipient_window,
+                "mean_unmet_shift_budget_percent": mean_unmet_shift_budget_percent,
+                "max_unmet_shift_budget_percent": max_unmet_shift_budget_percent,
+                "high_unmet_recovery_days": high_unmet_recovery_days,
+                "recovery_saturation_days": recovery_saturation_days,
+                "mean_recovery_capacity_used_percent": mean_recovery_capacity_used_percent,
             }
         )
 

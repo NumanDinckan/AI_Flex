@@ -105,17 +105,17 @@ From `rq3/bess_summary_intermediate.csv`:
 
 - Original annual peak: `0.3684`.
 - Residual annual peak after RQ2 flexibility: `0.3616` in both the `10%` and `25%` flex cases on this branch.
-- Residual annual peak after BESS ranges from about `0.3454` to `0.3407` across the four BESS cases.
-- Annual peak reduction versus original ranges from about `6.24%` to `7.51%`.
+- Residual annual peak after BESS ranges from about `0.3454` to `0.3404` across the four BESS cases.
+- Annual peak reduction versus original ranges from about `6.24%` to `7.60%`.
 - `price_signal_used = True`, because the UK price CSV was available.
 
-The strongest annual-peak case on this branch is `25% Flex + 8h BESS` at `0.3407`, equivalent to about `7.51%` annual peak reduction versus original. The strongest price-weighted cost proxy result is `25% Flex + 4h BESS`. This split is expected: the energy-matched lower-power `8h` cases produce less sharp peak clipping and less price-arbitrage leverage than a same-power 8h battery, but they better represent a sustained-delivery storage archetype.
+The strongest annual-peak case on this branch is `25% Flex + 8h BESS` at `0.3404`, equivalent to `7.6045%` annual peak reduction versus original. The strongest price-weighted cost proxy result is `25% Flex + 4h BESS` at `0.9013%`. This split is expected: the energy-matched lower-power `8h` cases produce less sharp peak clipping and less price-arbitrage leverage than a same-power 8h battery, but they better represent a sustained-delivery storage archetype.
 
 ## Inherited RQ2 Limitations
 
-RQ3 inherits the structure of the RQ2 flex-adjusted load that it dispatches on top of. On this branch, the RQ2 step uses the narrower `11:00-19:00` source window and fixed `22:00-06:00` recovery window. Two important limitations remain:
+RQ3 inherits the structure of the RQ2 flex-adjusted load that it dispatches on top of. On this branch, the RQ2 step uses the narrower `11:00-19:00` source window and scenario-specific recovery windows. Two important limitations remain:
 
-- overnight recovery is still constrained to the fixed `22:00-06:00` window
+- recovery is still constrained to prescribed windows: `22:00-06:00` for `10%` and `20:00-08:00` for `25%`
 - recovery is deterministic and does not model endogenous queue or rebound dynamics
 
 In other words, RQ3 does not remove the remaining RQ2 simplifications. It evaluates BESS on top of them.
@@ -172,7 +172,7 @@ Also use:
 
 For the result:
 
-> In the 2025 utilisation profile generated on this branch, RQ2 flexibility alone delivers only a modest peak change, but adding BESS reduces the annual peak from `0.3684` to between about `0.3454` and `0.3407`, equivalent to about `6.24%` to `7.51%` peak reduction depending on the scenario. The best annual-peak case is `25% Flex + 8h BESS`.
+> In the 2025 utilisation profile generated on this branch, RQ2 flexibility alone delivers only a modest peak change, but adding BESS reduces the annual peak from `0.3684` to between about `0.3454` and `0.3404`, equivalent to about `6.24%` to `7.60%` peak reduction depending on the scenario. The best annual-peak case is `25% Flex + 8h BESS`.
 
 ## Presentation Use
 

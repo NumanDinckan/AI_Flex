@@ -121,15 +121,19 @@ The residual peak column is kept because it anchors the percentage reduction in 
 | Scenario | Flex Case | BESS Duration | Residual Peak Utilisation | Annual Peak Reduction vs Original (%) | Price-Weighted Cost Reduction vs Original (%) |
 | --- | --- | --- | ---: | ---: | ---: |
 | 10% Flex only | 10% | No BESS | 0.3616 | 1.8355 | 0.0352 |
-| 25% Flex only | 25% | No BESS | 0.3616 | 1.8355 | 0.0917 |
+| 25% Flex only | 25% | No BESS | 0.3616 | 1.8355 | 0.0102 |
 | 10% Flex + 4h BESS | 10% | 4h | 0.3454 | 6.2470 | 0.6297 |
 | 10% Flex + 8h BESS | 10% | 8h | 0.3454 | 6.2362 | 0.4887 |
-| 25% Flex + 4h BESS | 25% | 4h | 0.3412 | 7.3718 | 0.9285 |
-| 25% Flex + 8h BESS | 25% | 8h | 0.3407 | 7.5064 | 0.7178 |
+| 25% Flex + 4h BESS | 25% | 4h | 0.3407 | 7.5223 | 0.9013 |
+| 25% Flex + 8h BESS | 25% | 8h | 0.3404 | 7.6045 | 0.6674 |
 
 ## Interpretation
 
 The column choices follow common data-centre demand-response and storage evaluation practice: peak reduction captures grid and capacity relevance, while electricity-price-weighted cost reduction captures whether the shifted or battery-adjusted profile moves consumption away from expensive hours.
+
+The current table shows a clear division between the two modelling layers. Flex-only dispatch reduces the annual peak from `0.3684` to `0.3616` in both flex cases, a `1.8355%` reduction. The `25%` flex-only case does not improve the annual peak beyond the `10%` case, and after price is excluded from the flex selector it also has only a `0.0102%` price-weighted cost proxy reduction. This supports interpreting RQ2 as a constrained operational load-shifting layer, not as the main peak-reduction mechanism.
+
+BESS supplies the larger peak effect. The strongest annual-peak case is `25% Flex + 8h BESS`, with residual peak `0.3404` and `7.6045%` peak reduction versus original. The strongest price-weighted cost proxy case is `25% Flex + 4h BESS`, with `0.9013%` reduction. This difference is expected because the `8h` batteries are energy-matched but lower-power variants, while the `4h` batteries retain higher instantaneous power for price-timed dispatch within the peak cap.
 
 The cost column is a price-weighted proxy:
 

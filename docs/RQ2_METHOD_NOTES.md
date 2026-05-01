@@ -4,7 +4,7 @@
 
 How does operational load shifting affect the annual load profile when flexibility is defined by load-reduction magnitude, event duration, and recipient hours?
 
-RQ2 translates the flexibility concept into explicit operational scenarios. It does not optimize workload scheduling in a full queue-aware sense. It asks what happens if a fixed share of load is reduced during selected high-load hours and recovered in a fixed overnight window.
+RQ2 translates the flexibility concept into explicit operational scenarios. It does not optimize workload scheduling in a full queue-aware sense. It asks what happens if a fixed share of load is reduced during selected high-load hours and recovered in scenario-specific off-peak windows.
 
 ## Data Basis
 
@@ -36,32 +36,35 @@ Implemented scenarios:
 
 - `10% Flex only`: up to `10%` load reduction, co-optimized across up to `2.5` peak-equivalent hours per day.
 - `25% Flex only`: up to `25%` load reduction, co-optimized across up to `4.0` peak-equivalent hours per day.
-- recipient window for both scenarios: `22:00-06:00`.
+- recipient window for `10%` flex: `22:00-06:00`.
+- recipient window for `25%` flex: `20:00-08:00`.
 
-The recipient window is intentionally wider than before. At half-hour resolution it provides `16` overnight recovery slots rather than the `8` slots available in the previous `22:00-02:00` specification. This keeps the recovery rule overnight and aligns it with an Economy-7-style low-price period.
+The `10%` recipient window is intentionally wider than the earlier `22:00-02:00` specification. The exploratory `25%` case uses a still broader `20:00-08:00` recovery corridor because the deeper reduction budget otherwise saturates overnight recovery capacity before the additional flexibility can be tested.
 
 The current selector does not use the original broad all-day eligibility rule. It now restricts source reductions to a narrower daytime peak window:
 
 - eligible source hours: `11:00-19:00`
 - daily flexible energy is still capped using a scenario-scaled peak-equivalent budget: `2.5` hours in the `10%` case and `4.0` hours in the `25%` case
-- the `25%` case is still exploratory and price-aware, but price is treated as a secondary signal rather than the primary objective
+- price is deliberately excluded from the flex selector; source intervals are prioritized by load magnitude and surplus above the annual mean-day reference
 
 Operationally, this means the RQ2 reduction now starts earlier than a late-evening-only event, but no longer smears across nearly the whole day.
 
 ## Recovery Rule
 
-Reduced load is recovered only inside the fixed overnight recipient window linked to the same source day:
+Reduced load is recovered only inside the scenario-specific recipient window linked to the same source day:
 
-- start: `22:00`
-- end: `06:00` on the following day
+- `10%` flex: `22:00-06:00`
+- `25%` flex: `20:00-08:00`
 
 Recovery is now co-optimized jointly with source reductions inside the daily linear program. Each overnight recipient slot has a scenario-specific upper bound:
 
-`recovery_ceiling = baseline_slot_load * (1 + flex_magnitude)`
+`recovery_ceiling = max(baseline_slot_load, annual_mean_load) * (1 + flex_magnitude)`
 
-This means the `10%` case can recover up to `1.10x` the baseline slot load and the `25%` case can recover up to `1.25x`. The rule makes rebound headroom scale with the same operational flexibility magnitude used for downward shifting.
+This means the `10%` case can recover up to `1.10x` the higher of the slot baseline or annual mean load, and the `25%` case can recover up to `1.25x`. Using annual mean load as a floor prevents low overnight baselines from artificially choking the high-flex recovery test, while keeping slot-specific load shape where it is already higher than the annual mean.
 
 The daily LP also minimizes a shared daily peak variable across the affected source and recovery slots. This prevents the optimizer from reducing the daytime event cleanly only to create a new rebound peak immediately after `22:00`.
+
+Price signals are deliberately excluded from this flexibility dispatch. RQ2 is framed as direct load control for grid-stress reduction, so the source-selection rule stays load-driven. Price responsiveness is handled only in RQ3, where the BESS LP uses price as a secondary dispatch criterion after the feasible peak cap has been established.
 
 ## Current 2025 Results
 
@@ -70,16 +73,17 @@ From `rq2/flexibility_summary_intermediate.csv`:
 - Both the `10%` and `25%` scenarios are active on `365` flex days.
 - The aggregate daily flexibility budget is `2.5` peak-equivalent hours in the `10%` case and `4.0` peak-equivalent hours in the `25%` case.
 - Shifted energy is about `16.96` utilisation-hours in the `10%` case.
-- Shifted energy is about `17.34` utilisation-hours in the `25%` case.
+- Shifted energy is about `27.95` utilisation-hours in the `25%` case.
 - The `10%` case reduces the annual peak from `0.3684` to `0.3616`, about `1.84%`.
 - The `25%` case also reduces the annual peak to `0.3616`, about `1.84%`.
-- Unmet overnight recovery is about `13.06` utilisation-hours in the `10%` case and about `102.75` utilisation-hours in the `25%` case.
+- Unmet shift budget is about `13.06` utilisation-hours in the `10%` case and about `92.13` utilisation-hours in the `25%` case.
+- Recovery diagnostics flag high unmet budget on `301` days for the `10%` case and all `365` days for the `25%` case.
 
-This branch therefore tells a more constrained story than the more aggressive experimental variants: the narrower `11:00-19:00` event window makes the event shape more defensible visually, but recovery limits remain strongly binding, especially in the `25%` case. RQ2 should be presented as a modest operational peak-shaving step rather than the main source of annual peak reduction.
+The wider `25%` recovery corridor materially increases realized shifted energy, but it does not create a different flex-only annual peak result. Recovery limits remain strongly binding, especially in the `25%` case. RQ2 should therefore be presented as a modest operational peak-shaving step and as the structured input to RQ3, not as the main source of annual peak reduction.
 
 ## Remaining Limitation
 
-The current implementation does include recovery: reduced load is reallocated into the fixed `22:00-06:00` overnight window subject to ceiling constraints, and reductions and recovery are solved jointly each day. However, it still does not model endogenous task queues, stochastic deferral release, or synchronized rebound after event conditions relax. Chen et al. (2025) warn that deferred inference or training tasks can be rescheduled together once conditions improve, potentially creating secondary peaks.
+The current implementation does include recovery: reduced load is reallocated into scenario-specific off-peak windows subject to ceiling constraints, and reductions and recovery are solved jointly each day. However, it still does not model endogenous task queues, stochastic deferral release, or synchronized rebound after event conditions relax. Chen et al. (2025) warn that deferred inference or training tasks can be rescheduled together once conditions improve, potentially creating secondary peaks.
 
 Operational implication:
 
@@ -111,9 +115,11 @@ In the current filtered 2025 run, Panel B selects `2025-08-12`, the day containi
 
 Use:
 
-> RQ2 defines flexibility operationally. The 10% case allows up to 10% load reduction under a `2.5` peak-equivalent-hour daily budget, while the 25% case allows up to 25% load reduction under a `4.0` peak-equivalent-hour daily budget. In both cases, source reductions are restricted to an `11:00-19:00` daytime peak window and shifted load is recovered in the fixed `22:00-06:00` overnight window.
+> RQ2 defines flexibility operationally. The 10% case allows up to 10% load reduction under a `2.5` peak-equivalent-hour daily budget, while the 25% case allows up to 25% load reduction under a `4.0` peak-equivalent-hour daily budget. In both cases, source reductions are restricted to an `11:00-19:00` daytime peak window. Shifted load is recovered in `22:00-06:00` for the 10% case and `20:00-08:00` for the exploratory 25% case.
 >
-> The current selector allocates reductions across eligible intervals where they do the most peak-shaving work while respecting a scenario-scaled overnight recovery ceiling of `baseline_slot_load * (1 + flex_magnitude)`. The daily optimization also constrains recovery against the same peak-cap variable so that overnight rebound does not simply replace the daytime peak.
+> The current selector allocates reductions across eligible intervals where they do the most peak-shaving work while respecting a recovery ceiling of `max(baseline_slot_load, annual_mean_load) * (1 + flex_magnitude)`. The daily optimization also constrains recovery against the same peak-cap variable so that rebound does not simply replace the daytime peak.
+>
+> Price signals are deliberately excluded from the flexibility dispatch to keep RQ2 a single-objective peak-shaving scenario. Price responsiveness is handled exclusively in the BESS dispatch layer.
 
 Also include:
 
@@ -132,7 +138,7 @@ Recommended slide:
 
 - The model uses utilisation ratios, not MW.
 - The method is a transparent scenario rule, not an optimization of every possible workload shift.
-- The fixed recipient window is a modelling choice for reproducibility.
+- The prescribed recipient windows are modelling choices for reproducibility.
 - The model uses deterministic overnight recovery, but it does not fully model endogenous rebound dynamics.
 
 ## References

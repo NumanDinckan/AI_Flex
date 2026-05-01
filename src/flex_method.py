@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import warnings
 from dataclasses import dataclass
 
 import numpy as np
@@ -21,9 +22,12 @@ class FlexScenario:
 
 DEFAULT_RECIPIENT_WINDOW_START_HOUR = 22.0
 DEFAULT_RECIPIENT_WINDOW_END_HOUR = 6.0
+EXPLORATORY_RECIPIENT_WINDOW_START_HOUR = 20.0
+EXPLORATORY_RECIPIENT_WINDOW_END_HOUR = 8.0
 CONSERVATIVE_FLEX_BUDGET_HOURS = 2.5
 EXPLORATORY_FLEX_BUDGET_HOURS = 4.0
 PEAK_TOL = 1e-6
+HIGH_UNMET_BUDGET_WARN_THRESHOLD = 0.20
 
 FLEX_SCENARIOS: tuple[FlexScenario, ...] = (
     FlexScenario(
@@ -40,8 +44,8 @@ FLEX_SCENARIOS: tuple[FlexScenario, ...] = (
         name="Exploratory Flex 25%",
         flex_share=0.25,
         max_peak_hours=EXPLORATORY_FLEX_BUDGET_HOURS,
-        recipient_window_start_hour=DEFAULT_RECIPIENT_WINDOW_START_HOUR,
-        recipient_window_end_hour=DEFAULT_RECIPIENT_WINDOW_END_HOUR,
+        recipient_window_start_hour=EXPLORATORY_RECIPIENT_WINDOW_START_HOUR,
+        recipient_window_end_hour=EXPLORATORY_RECIPIENT_WINDOW_END_HOUR,
         framing="25% load reduction co-optimized across up to 4.0 peak-equivalent hours per day",
         exploratory=True,
     ),
@@ -53,11 +57,14 @@ def _recovery_slot_upper_bound(
     scenario: FlexScenario,
     base_load: np.ndarray,
     load_total: np.ndarray,
+    mean_load: float,
 ) -> float:
-    # Recovery headroom scales directly with the flex magnitude. A scenario that can
-    # reduce more deeply is also assumed to be able to absorb a proportionally larger
-    # overnight recovery pulse in the same slot.
-    recovery_upper = min((1.0 + scenario.flex_share) * base_load[rec_idx], 1.0)
+    # Use the annual mean as a floor for recovery headroom so low overnight slots do
+    # not artificially choke high-flex scenarios. Keeping the slot baseline as an
+    # upper reference when it is higher avoids tightening any slot versus the
+    # previous baseline-slot rule.
+    recovery_reference = max(base_load[rec_idx], mean_load)
+    recovery_upper = min((1.0 + scenario.flex_share) * recovery_reference, 1.0)
     return max(0.0, recovery_upper - load_total[rec_idx])
 
 
@@ -139,27 +146,10 @@ def _build_day_pair_problem(
     pairs_by_recipient: dict[int, list[int]] = {idx: [] for idx in recipient_idx}
 
     peak_ref = max(day_peak, 1e-9)
-    price_series = pd.to_numeric(work["uk_price"], errors="coerce") if "uk_price" in work.columns else None
-    max_price = float(np.nanmax(price_series.to_numpy(dtype=float))) if price_series is not None else 1.0
-    if not np.isfinite(max_price):
-        max_price = 1.0
-    max_price = max(max_price, 1e-9)
-
     for src_idx in source_idx:
         src_ts = pd.Timestamp(work.loc[src_idx, "timestamp"])
         surplus = max(0.0, base_load[src_idx] - reference_load[src_idx])
-        if scenario.exploratory and price_series is not None:
-            # The exploratory 25% case is price-responsive: it prioritizes higher-price
-            # source intervals while still favoring load that sits above the reference profile.
-            src_price = float(price_series.loc[src_idx])
-            if np.isfinite(src_price):
-                price_norm = src_price / max_price
-                priority = 1.0 + price_norm + (surplus / peak_ref)
-            else:
-                priority = 1.0 + (base_load[src_idx] / peak_ref) + (surplus / peak_ref)
-        else:
-            # The conservative 10% case remains load-magnitude driven.
-            priority = 1.0 + (base_load[src_idx] / peak_ref) + (surplus / peak_ref)
+        priority = 1.0 + (base_load[src_idx] / peak_ref) + (surplus / peak_ref)
         for rec_idx in recipient_idx:
             rec_ts = pd.Timestamp(work.loc[rec_idx, "timestamp"])
             if rec_ts <= src_ts:
@@ -190,14 +180,15 @@ def _solve_daily_shift_lp(
     reference_load: np.ndarray,
     load_total: np.ndarray,
     original_annual_peak: float,
+    mean_load: float,
     dt_hours: float,
     scenario: FlexScenario,
-) -> tuple[np.ndarray, np.ndarray, float, float, float]:
+) -> tuple[np.ndarray, np.ndarray, float, float, float, float, int]:
     outgoing = np.zeros(len(load_total), dtype=float)
     incoming = np.zeros(len(load_total), dtype=float)
 
     if not source_idx or not recipient_idx:
-        return outgoing, incoming, 0.0, 0.0, 0.0
+        return outgoing, incoming, 0.0, 0.0, 0.0, 0.0, 0
 
     (
         pairs,
@@ -219,7 +210,7 @@ def _solve_daily_shift_lp(
     )
 
     if not pairs or budget <= 1e-12:
-        return outgoing, incoming, budget, 0.0, 0.0
+        return outgoing, incoming, budget, 0.0, 0.0, 0.0, 0
 
     n_pairs = len(pairs)
     var_count = 1 + n_pairs
@@ -246,12 +237,15 @@ def _solve_daily_shift_lp(
             scenario=scenario,
             base_load=base_load,
             load_total=load_total,
+            mean_load=mean_load,
         )
         row = np.zeros(var_count, dtype=float)
         for pair_pos in pairs_by_recipient.get(rec_idx, []):
             row[1 + pair_pos] = 1.0
         a_ub_rows.append(row)
         b_ub_rows.append(float(recipient_capacity[rec_idx]))
+
+    recovery_capacity_total = float(sum(recipient_capacity.values()))
 
     budget_row = np.zeros(var_count, dtype=float)
     budget_row[1:] = 1.0
@@ -281,7 +275,7 @@ def _solve_daily_shift_lp(
         method="highs",
     )
     if not peak_stage.success:
-        return outgoing, incoming, budget, 0.0, 0.0
+        return outgoing, incoming, budget, 0.0, 0.0, recovery_capacity_total, 0
 
     peak_cap = float(peak_stage.x[idx_m])
     peak_limit_row = np.zeros(var_count, dtype=float)
@@ -299,7 +293,7 @@ def _solve_daily_shift_lp(
         method="highs",
     )
     if not allocation_stage.success:
-        return outgoing, incoming, budget, peak_cap, 0.0
+        return outgoing, incoming, budget, peak_cap, 0.0, recovery_capacity_total, 0
 
     pair_values = allocation_stage.x[1:]
     delay_weighted_sum = 0.0
@@ -311,7 +305,21 @@ def _solve_daily_shift_lp(
         incoming[rec_idx] += float(value)
         delay_weighted_sum += float(value) * float(delay_hours[pair_pos])
 
-    return outgoing, incoming, budget, peak_cap, delay_weighted_sum
+    saturated_recovery_slots = sum(
+        1
+        for rec_idx, capacity in recipient_capacity.items()
+        if capacity > 1e-12 and incoming[rec_idx] >= capacity - 1e-10
+    )
+
+    return (
+        outgoing,
+        incoming,
+        budget,
+        peak_cap,
+        delay_weighted_sum,
+        recovery_capacity_total,
+        int(saturated_recovery_slots),
+    )
 
 
 def apply_shiftable_flex_for_scenario(
@@ -325,6 +333,7 @@ def apply_shiftable_flex_for_scenario(
     work = year_df.sort_values("timestamp").reset_index()
     base_load = work["utilisation"].to_numpy(dtype=float)
     original_annual_peak = float(np.max(base_load)) if base_load.size else 0.0
+    mean_load = float(np.mean(base_load)) if base_load.size else 0.0
     reference_col = "mean_day_base" if "mean_day_base" in work.columns else "med_base"
     reference_load = work[reference_col].to_numpy(dtype=float)
 
@@ -354,7 +363,15 @@ def apply_shiftable_flex_for_scenario(
             source_date=pd.Timestamp(date),
             scenario=scenario,
         )
-        outgoing, incoming, shiftable_target, optimized_peak, delay_weighted_sum = _solve_daily_shift_lp(
+        (
+            outgoing,
+            incoming,
+            shiftable_target,
+            optimized_peak,
+            delay_weighted_sum,
+            recovery_capacity_total,
+            recovery_saturation_slots,
+        ) = _solve_daily_shift_lp(
             work=work,
             source_idx=source_candidates,
             recipient_idx=recipient_candidates,
@@ -363,6 +380,7 @@ def apply_shiftable_flex_for_scenario(
             reference_load=reference_load,
             load_total=load_total,
             original_annual_peak=original_annual_peak,
+            mean_load=mean_load,
             dt_hours=dt_hours,
             scenario=scenario,
         )
@@ -380,11 +398,13 @@ def apply_shiftable_flex_for_scenario(
 
         realized = float(outgoing.sum())
         unmet = max(0.0, shiftable_target - realized)
-        saturated_recovery_slots = {
-            int(rec_idx)
-            for rec_idx in recipient_candidates
-            if incoming[rec_idx] > 1e-12 and load_total[rec_idx] >= original_annual_peak - 1e-10
-        }
+        unmet_shift_budget_percent = (
+            float(unmet / shiftable_target * 100.0) if shiftable_target > 1e-12 else 0.0
+        )
+        high_unmet_recovery_warning = bool(
+            shiftable_target > 1e-12
+            and unmet / shiftable_target > HIGH_UNMET_BUDGET_WARN_THRESHOLD
+        )
 
         daily_rows.append(
             {
@@ -407,9 +427,17 @@ def apply_shiftable_flex_for_scenario(
                 "shiftable_target": float(shiftable_target),
                 "shiftable_realized": float(realized),
                 "shiftable_unmet": float(unmet),
+                "unmet_shift_budget_percent": unmet_shift_budget_percent,
                 "shifted_energy_utilisation_hours": float(realized * dt_hours),
                 "feasible_day": bool(unmet <= 1e-10),
-                "recovery_saturation_slots": int(len(saturated_recovery_slots)),
+                "recovery_capacity_total": recovery_capacity_total,
+                "recovery_capacity_used_percent": (
+                    float(realized / recovery_capacity_total * 100.0)
+                    if recovery_capacity_total > 1e-12
+                    else 0.0
+                ),
+                "recovery_saturation_slots": int(recovery_saturation_slots),
+                "high_unmet_recovery_warning": high_unmet_recovery_warning,
                 "average_deferment_hours": float(delay_weighted_sum / realized) if realized > 1e-12 else 0.0,
                 "used_eligible_flex_percent": float(realized / shiftable_target * 100.0) if shiftable_target > 1e-12 else 0.0,
                 "fully_recovered_percent": float(realized / shiftable_target * 100.0) if shiftable_target > 1e-12 else 0.0,
@@ -419,6 +447,21 @@ def apply_shiftable_flex_for_scenario(
                 "optimized_day_peak_after_flex": float(optimized_peak),
             }
         )
+
+    daily_stats = pd.DataFrame(daily_rows)
+    if not daily_stats.empty:
+        high_unmet_days = int(daily_stats["high_unmet_recovery_warning"].sum())
+        if high_unmet_days:
+            year_label = int(work["year"].iloc[0]) if "year" in work.columns and len(work) else "unknown"
+            warnings.warn(
+                (
+                    f"{scenario.name} ({year_label}): {high_unmet_days} days exceed "
+                    f"{HIGH_UNMET_BUDGET_WARN_THRESHOLD:.0%} unmet shift budget; "
+                    "recovery architecture is binding."
+                ),
+                RuntimeWarning,
+                stacklevel=2,
+            )
 
     return (
         {
@@ -431,7 +474,7 @@ def apply_shiftable_flex_for_scenario(
             "event_selected": event_selected,
             "row_index": work["index"].to_numpy(dtype=int),
         },
-        pd.DataFrame(daily_rows),
+        daily_stats,
     )
 
 

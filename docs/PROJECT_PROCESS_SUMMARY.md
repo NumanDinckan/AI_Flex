@@ -84,16 +84,19 @@ Public data-centre utilisation profiles are not completely flat. They show short
 
 RQ2 turns the flexibility opportunity into explicit operational scenarios.
 
-The current `main` branch uses a fixed recovery window:
+The current `main` branch uses scenario-specific recovery windows:
 
-- `10%` Flex: up to `10%` load reduction for at most `3` consecutive peak hours.
-- `25%` Flex: up to `25%` load reduction for at most `3` consecutive peak hours.
-- Recovery window: `22:00-02:00`.
-- Event search window: weekday `14:00-22:00`.
+- `10%` Flex: `10%` load reduction co-optimized across up to `2.5` peak-equivalent hours per day.
+- `25%` Flex: `25%` load reduction co-optimized across up to `4.0` peak-equivalent hours per day.
+- Recovery window, `10%`: `22:00-06:00`.
+- Recovery window, `25%`: `20:00-08:00`.
+- Source window: `11:00-19:00`.
 
-The model selects the highest consecutive peak block within the event window, reduces the flexible share there, and then recovers the shifted load in the fixed overnight recipient window where feasible.
+The model co-optimizes source reductions and recipient recovery in a daily linear program, then recovers shifted load in the scenario-specific off-peak recipient window where feasible.
 
-The implementation also prevents recovery from creating a new load spike above the original annual peak.
+The flex selector is intentionally load-driven. UK price data is not used to choose flexible source intervals; price responsiveness is reserved for the BESS dispatch stage and the scenario comparison cost proxy.
+
+The implementation minimizes a shared daily peak variable across source and recovery slots so the rebound does not simply replace the daytime peak inside the daily LP.
 
 RQ2 outputs:
 
@@ -105,15 +108,15 @@ RQ2 outputs:
 
 Current 2025 result:
 
-- Original annual peak: `0.5643`
-- Residual annual peak after `10%` flex: `0.5643`
-- Residual annual peak after `25%` flex: `0.5643`
-- Shifted energy, `10%` case: about `3.75` utilisation-hours
-- Shifted energy, `25%` case: about `3.86` utilisation-hours
+- Original annual peak: `0.3684`
+- Residual annual peak after `10%` flex: `0.3616`
+- Residual annual peak after `25%` flex: `0.3616`
+- Shifted energy, `10%` case: about `16.96` utilisation-hours
+- Shifted energy, `25%` case: about `27.95` utilisation-hours
 
 Main interpretation:
 
-RQ2 shifts load but does not reduce the absolute annual peak in the current dataset. This happens because the absolute annual peak is not sufficiently affected by the selected flex events and because recovery constraints limit how much extra shifting the `25%` case can realise. Therefore, RQ2 is best presented as the operational load-shifting step that prepares the input for RQ3.
+RQ2 shifts load and gives a modest annual peak reduction, but both flex-only scenarios still land at the same residual annual peak. The widened `25%` recovery corridor realizes more shifted energy, yet recovery diagnostics still show high unmet budget across the year. Therefore, RQ2 is best presented as the operational load-shifting step that prepares the input for RQ3.
 
 ## 7. RQ3 Process
 
@@ -126,20 +129,30 @@ The BESS cases are:
 - `25% Flex + 4h BESS`
 - `25% Flex + 8h BESS`
 
-Battery power is set as:
+Battery sizing uses the original annual utilisation peak as the reference:
 
 ```text
-battery_power = 0.25 * original_annual_peak
+battery_power = battery_power_fraction * original_annual_peak
+battery_energy = battery_power * duration_hours
 ```
 
-Battery energy is:
+The scenario sizing is:
 
-```text
-4h battery_energy = battery_power * 4
-8h battery_energy = battery_power * 8
-```
+| Scenario | Power fraction | Duration | Energy relative to original peak |
+| --- | ---: | ---: | ---: |
+| `10% Flex + 4h BESS` | `0.10` | `4h` | `0.40 * original_peak` |
+| `10% Flex + 8h BESS` | `0.05` | `8h` | `0.40 * original_peak` |
+| `25% Flex + 4h BESS` | `0.25` | `4h` | `1.00 * original_peak` |
+| `25% Flex + 8h BESS` | `0.125` | `8h` | `1.00 * original_peak` |
 
-The BESS dispatch is a 48-hour receding-horizon linear program. It is peak-first:
+Within each flex case, the `8h` BESS is energy-matched to the paired `4h` case and uses half the power rating. This makes the `8h` case a lower-C-rate sustained-delivery asset rather than a same-power doubled-energy upgrade.
+
+The BESS dispatch is a duration-specific receding-horizon linear program:
+
+- `4h` batteries use a `48h` horizon.
+- `8h` batteries use a `72h` horizon.
+
+It is peak-first:
 
 1. minimize residual grid-import peak
 2. minimize terminal state-of-charge deviation
@@ -154,14 +167,14 @@ RQ3 outputs:
 
 Current 2025 result:
 
-- Original annual peak: `0.5643`
-- Residual annual peak after RQ2 flexibility: `0.5643`
-- Residual annual peak after BESS: about `0.4239`
-- Annual peak reduction after BESS: about `24.9%`
+- Original annual peak: `0.3684`
+- Residual annual peak after RQ2 flexibility: `0.3616`
+- Residual annual peak after BESS: `0.3454` to `0.3404`
+- Annual peak reduction after BESS: `6.24%` to `7.60%`
 
 Main interpretation:
 
-BESS provides the main annual peak reduction result. The `4h` and `8h` BESS cases produce very similar peak reductions because both have enough power to reduce the binding peak in this setup. The `8h` case has a larger impact on price-weighted cost because it has more energy capacity to move import away from expensive hours.
+BESS provides the main annual peak reduction result. The strongest annual-peak result is `25% Flex + 8h BESS`, with residual peak `0.3404` and `7.6045%` peak reduction versus original. The strongest price-weighted cost proxy result is `25% Flex + 4h BESS`, with `0.9013%` reduction. This split is consistent with the sizing design: the lower-power `8h` case can sustain delivery, while the higher-power `4h` case has more leverage for price-timed charge and discharge inside the peak-first cap.
 
 ## 8. Scenario Comparison Table
 
@@ -218,9 +231,9 @@ A separate branch exists for a no-fixed-recovery-window sensitivity:
 experiment/no-fixed-recovery-window
 ```
 
-That branch replaces the fixed `22:00-02:00` recovery window with dynamic recovery within a `24` hour horizon using low-load and low-price recipient slots.
+That branch replaces fixed recovery windows with dynamic recovery within a `24` hour horizon using low-load and low-price recipient slots.
 
-The current `main` branch, however, uses the fixed `22:00-02:00` recovery window.
+The current `main` branch, however, uses scenario-specific fixed recovery windows.
 
 ## 11. Final Storyline
 
@@ -232,4 +245,4 @@ The project should be presented as a three-step analysis:
 
 The central final message is:
 
-> Public data-centre utilisation profiles show concentrated peak periods. Operational flexibility can shift some load, but in the current fixed-window setup it does not reduce the absolute annual peak. Adding BESS after flexibility reduces the residual annual peak by about `24.9%`, while the price-weighted cost proxy also improves, especially for the `8h` BESS cases.
+> Public data-centre utilisation profiles show concentrated peak periods. Operational flexibility can shift some load and modestly reduce the annual peak, but recovery constraints remain binding. Adding BESS after flexibility reduces the residual annual peak by about `7.60%` in the strongest case, while the price-weighted cost proxy improves most in the `25% Flex + 4h BESS` case.

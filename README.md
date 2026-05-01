@@ -75,7 +75,8 @@ RQ2 uses the full-year half-hour load profile and reports annual mean-day and an
 
 - `10%` flex: `10%` load reduction co-optimized across up to `2.5` peak-equivalent hours per day.
 - `25%` flex: `25%` load reduction co-optimized across up to `4.0` peak-equivalent hours per day.
-- shifted load is recovered in the fixed off-peak recipient window `22:00-06:00`.
+- shifted load is recovered in scenario-specific off-peak recipient windows: `22:00-06:00` for `10%` flex and `20:00-08:00` for `25%` flex.
+- source intervals are selected by load magnitude and surplus above the annual mean-day reference; price is deliberately excluded from RQ2 flexibility.
 
 RQ3 applies BESS dispatch to the RQ2 flex-adjusted full-year series. The battery dispatch is peak-first and, when UK price data is present, price-aware as a secondary objective. Dispatch uses a duration-specific rolling horizon: `48h` for `4h` batteries and `72h` for `8h` batteries. Within each flex case, the `8h` BESS is energy-matched to the paired `4h` BESS and uses half the power rating, representing a lower-C-rate sustained-delivery case. Figure 2 shows annual mean 48-hour reporting profiles for the `10%` and `25%` flexibility cases with `4h` and `8h` BESS durations.
 
