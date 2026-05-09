@@ -11,6 +11,9 @@ venv/
 
 # Generated report outputs
 outputs/
+rq1/
+rq2/
+rq3/
 
 # Large/raw local data
 data/raw/*
